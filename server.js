@@ -42,21 +42,43 @@ io.on('connection', socket => {
     console.log(`Receiver ${socket.id} joined room ${roomId}`);
   });
 
-  // Relay offer/answer
+  // Relay offer/answer and ICE candidates
   socket.on('offer', ({ to, offer }) => io.to(to).emit('offer', { from: socket.id, offer }));
   socket.on('answer', ({ to, answer }) => io.to(to).emit('answer', { from: socket.id, answer }));
   socket.on('ice-candidate', ({ to, candidate }) => io.to(to).emit('ice-candidate', { from: socket.id, candidate }));
 
+  // Receiver manually disconnects
+  socket.on('receiver-disconnect', () => {
+    rooms.forEach((room, roomId) => {
+      if (room.receivers.has(socket.id)) {
+        room.receivers.delete(socket.id);
+
+        // Notify the sender
+        io.to(room.sender).emit('receiver-disconnect', { receiverId: socket.id });
+        io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
+
+        console.log('Receiver manually disconnected:', socket.id);
+      }
+    });
+  });
+
+  // Handle socket disconnect
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
+
     rooms.forEach((room, roomId) => {
       if (room.sender === socket.id) {
-        // Notify all receivers if needed (optional)
+        // Notify all receivers that sender disconnected
         room.receivers.forEach(rid => io.to(rid).emit('sender-disconnected'));
         rooms.delete(roomId);
       } else if (room.receivers.has(socket.id)) {
         room.receivers.delete(socket.id);
+
+        // Notify sender about this receiver leaving
+        io.to(room.sender).emit('receiver-disconnect', { receiverId: socket.id });
         io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
+
+        console.log('Receiver disconnected:', socket.id);
       }
     });
   });

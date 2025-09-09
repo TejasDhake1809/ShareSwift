@@ -65,6 +65,20 @@ document.addEventListener('DOMContentLoaded', () => {
     await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
   });
 
+  // Handle receiver disconnect
+  socket.on('receiver-disconnect', ({ receiverId }) => {
+    const conn = receivers.get(receiverId);
+    if (!conn) return;
+
+    if (conn.dataChannel) conn.dataChannel.close();
+    if (conn.pc) conn.pc.close();
+
+    receivers.delete(receiverId);
+    showToast(`Receiver ${receiverId} disconnected`, "error");
+
+    peerStatus.textContent = `Connected peers: ${receivers.size}`;
+  });
+
   socket.on('update-receivers', ({ count }) => {
     peerStatus.textContent = `Connected peers: ${count}`;
   });

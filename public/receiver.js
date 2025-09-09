@@ -4,10 +4,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const joinInput = document.getElementById('join-room-input');
   const joinBtn = document.getElementById('join-room-btn');
   const joinStatus = document.getElementById('join-status');
+  const joinPanel = document.getElementById('join-panel');
   const receivePanel = document.getElementById('receive-panel');
   const receivedFiles = document.getElementById('received-files');
   const roomDisplay = document.getElementById('room-display');
   const receivedMetrics = document.getElementById('received-metrics');
+  const disconnectBtn = document.getElementById('disconnect-btn');
 
   let pc = null;
   let dataChannel = null;
@@ -20,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
 
+  // Join room
   joinBtn.addEventListener('click', () => {
     const roomId = joinInput.value.trim();
     if (!roomId) return showToast('Enter Room ID', 'error');
@@ -49,6 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
       dataChannel.binaryType = 'arraybuffer';
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
+        joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", 'success');
       };
       dataChannel.onmessage = handleDataMessage;
@@ -121,10 +125,31 @@ document.addEventListener('DOMContentLoaded', () => {
     incoming = { buffer: [], meta: null, received: 0, row: null };
   }
 
+  // Copy Room ID
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
     navigator.clipboard.writeText(roomDisplay.textContent)
       .then(() => showToast(`Room ID copied!`, 'success'))
       .catch(() => showToast('Failed to copy', 'error'));
+  });
+
+  // Disconnect button functionality
+  disconnectBtn.addEventListener('click', () => {
+    if (dataChannel) dataChannel.close();
+    if (pc) pc.close();
+
+    socket.emit('receiver-disconnect');
+
+    receivePanel.classList.add('hidden');
+    joinPanel.classList.remove('hidden');
+    joinStatus.textContent = '';
+    receivedFiles.innerHTML = '';
+    receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
+    roomDisplay.textContent = '';
+
+    showToast("Disconnected from room", "info");
+
+    dataChannel = null;
+    pc = null;
   });
 });
