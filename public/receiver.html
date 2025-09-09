@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>ShareSwift — Receiver</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -9,14 +10,19 @@
   <main class="container">
     <h1>ShareSwift — Receiver</h1>
 
+    <!-- Join Panel -->
     <div id="join-panel">
       <input type="text" id="join-room-input" placeholder="Enter Room ID" />
       <button id="join-room-btn">Join Room</button>
-      <div id="join-status" class="mono"></div>
+      <div id="join-status" class="mono status"></div>
     </div>
 
+    <!-- Receive Panel -->
     <div id="receive-panel" class="hidden">
-      <div>Room: <span id="room-display" class="mono"></span></div>
+      <div class="room-wrapper">
+        <span class="label">Room:</span>
+        <span id="room-display" class="mono room-id" title="Click to copy"></span>
+      </div>
 
       <div class="metrics">
         <div id="received-metrics" class="mono">
@@ -24,6 +30,7 @@
         </div>
       </div>
 
+      <h2 class="section-title">Received Files</h2>
       <div id="received-files"></div>
     </div>
   </main>

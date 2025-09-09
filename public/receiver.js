@@ -17,22 +17,31 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalFiles = 0;
   let totalBytes = 0;
 
+  // Join room button
   joinBtn.addEventListener('click', () => {
     const roomId = joinInput.value.trim();
-    if (!roomId) return alert('Enter Room ID');
-
+    if (!roomId) {
+      joinStatus.textContent = 'Enter Room ID';
+      joinStatus.className = 'error';
+      return;
+    }
     joinStatus.textContent = 'Joining...';
+    joinStatus.className = 'connecting';
     socket.emit('receiver-join', { roomId });
   });
 
+  // No sender found
   socket.on('no-sender', ({ message }) => {
     joinStatus.textContent = message;
+    joinStatus.className = 'error';
   });
 
+  // Receive offer
   socket.on('offer', async ({ from, offer }) => {
     const roomId = joinInput.value.trim();
-    roomDisplay.textContent = `Room: ${roomId}`;
+    roomDisplay.textContent = roomId;
     joinStatus.textContent = 'Connected';
+    joinStatus.className = 'connected';
 
     pc = new RTCPeerConnection(rtcConfig);
 
@@ -45,6 +54,12 @@ document.addEventListener('DOMContentLoaded', () => {
       dataChannel.binaryType = 'arraybuffer';
       dataChannel.onopen = () => receivePanel.classList.remove('hidden');
       dataChannel.onmessage = handleDataMessage;
+
+      // Handle disconnects
+      dataChannel.onclose = () => {
+        joinStatus.textContent = 'Disconnected';
+        joinStatus.className = 'disconnected';
+      };
     };
 
     await pc.setRemoteDescription(offer);
@@ -58,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
   });
 
+  // Handle incoming data
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
@@ -77,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
     incoming.received = 0;
 
     const row = document.createElement('div');
-    row.className = 'incoming-entry';
+    row.className = 'file-entry';
     row.innerHTML = `
       <div class="fname">${meta.filename}</div>
       <div class="progress-bar"><div class="progress-bar-fill"></div></div>
@@ -111,4 +127,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     incoming = { buffer: [], meta: null, received: 0, row: null };
   }
+
+  // Click-to-copy room ID
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent)
+      .then(() => alert(`Room ID ${roomDisplay.textContent} copied to clipboard!`))
+      .catch(err => console.error('Failed to copy room ID', err));
+  });
 });

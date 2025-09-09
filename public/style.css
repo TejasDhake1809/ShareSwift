@@ -13,67 +13,87 @@ body {
   justify-content: center;
   align-items: flex-start;
   min-height: 100vh;
-  padding: 40px 20px;
+  padding: 50px 20px;
 }
 
 /* Container */
-main.container {
+main.container, .container {
   background: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+  border-radius: 16px;
+  box-shadow: 0 12px 25px rgba(0,0,0,0.1);
   width: 100%;
-  max-width: 500px;
-  padding: 30px 40px;
+  max-width: 600px;
+  padding: 50px 50px 40px 50px;
 }
 
+/* Title */
 h1 {
   text-align: center;
   color: #2c3e50;
-  margin-bottom: 30px;
+  margin-bottom: 40px;
 }
 
-/* Text & metrics */
-#room-display, #room-display-persistent, #join-status,
-#peer-status, #file-metrics, #received-metrics {
-  margin-top: 10px;
+/* Create Room (Sender) */
+#create-panel {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 25px;
+}
+
+#create-panel button {
+  font-size: 1.2em;
+  padding: 14px 24px;
+  border-radius: 10px;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+/* Room ID */
+.room-id {
+  display: inline-block;
+  font-size: 2em;
+  font-weight: bold;
+  background: #ecf0f1;
+  padding: 10px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: all;
+  margin-top: 20px;
+  transition: background 0.2s ease;
+}
+
+.room-id:hover {
+  background: #dfe6e9;
+}
+
+/* Metrics */
+.metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+#peer-status, #file-metrics {
   font-family: monospace;
-  font-size: 1.05em;
+  font-size: 1.4em;
+  font-weight: bold;
   color: #34495e;
 }
 
-.metrics {
-  margin-top: 15px;
-}
-
-/* Inputs */
-input[type="text"], input[type="file"] {
-  width: 100%;
-  padding: 12px 15px;
-  border-radius: 8px;
-  border: 1px solid #ccc;
-  margin-top: 10px;
-  margin-bottom: 15px;
-  font-size: 1em;
-  transition: border 0.2s ease;
-}
-
-input[type="text"]:focus, input[type="file"]:focus {
-  border-color: #3498db;
-  outline: none;
-}
-
-/* File input label (custom styled) */
+/* File input label (Sender) */
 .file-input-label {
   display: block;
-  padding: 12px 15px;
+  padding: 14px 16px;
   background: #3498db;
   color: #fff;
-  border-radius: 8px;
+  border-radius: 10px;
   cursor: pointer;
   text-align: center;
   font-weight: bold;
-  margin-bottom: 10px;
-  transition: background 0.2s ease;
+  margin-top: 20px;
+  margin-bottom: 15px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  transition: all 0.2s ease;
 }
 
 .file-input-label:hover {
@@ -84,21 +104,24 @@ input[type="text"]:focus, input[type="file"]:focus {
   display: none;
 }
 
-/* Buttons */
-button {
-  background: #3498db;
-  color: white;
-  border: none;
-  padding: 12px 20px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 1em;
+/* File actions (send / cancel) */
+.file-actions {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 25px;
+}
+
+.file-actions button {
+  flex: 1;
+  padding: 14px 0;
+  font-size: 1.1em;
   font-weight: bold;
+  border-radius: 10px;
+  box-shadow: 0 3px 6px rgba(0,0,0,0.1);
   transition: all 0.2s ease;
 }
 
-button:hover {
-  background: #2980b9;
+.file-actions button:hover:not(:disabled) {
   transform: translateY(-2px);
 }
 
@@ -106,45 +129,44 @@ button:disabled {
   background: #95a5a6;
   cursor: not-allowed;
   transform: none;
-}
-
-/* Button container */
-.file-actions {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
+  box-shadow: none;
 }
 
 /* File list & entries */
 .files-list, #received-files {
-  margin-top: 20px;
+  margin-top: 25px;
 }
 
 .file-entry, .incoming-entry {
   background: #ecf0f1;
-  padding: 12px 15px;
-  border-radius: 8px;
-  margin-bottom: 12px;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  padding: 16px 20px;
+  border-radius: 10px;
+  margin-bottom: 15px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
   display: flex;
   flex-direction: column;
+  transition: transform 0.2s ease;
+}
+
+.file-entry:hover, .incoming-entry:hover {
+  transform: translateY(-2px);
 }
 
 .file-entry .fname, .incoming-entry .fname {
   font-weight: bold;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   color: #2c3e50;
   word-break: break-all;
 }
 
 /* Progress bar */
 .progress-bar {
-  height: 10px;
+  height: 14px;
   width: 100%;
   background: #dfe6e9;
-  border-radius: 5px;
+  border-radius: 7px;
   overflow: hidden;
-  margin-top: 5px;
+  margin-top: 6px;
 }
 
 .progress-bar-fill {
@@ -159,7 +181,63 @@ button:disabled {
   display: none;
 }
 
-/* Receiver panel tweaks */
-#receive-panel {
-  margin-top: 15px;
+/* ---------------- Receiver-specific styles ---------------- */
+
+/* Join Panel */
+#join-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 25px;
+}
+
+#join-panel input {
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  font-size: 1em;
+  width: 100%;
+}
+
+/* Join Room button */
+#join-panel button {
+  background: #27ae60;
+  color: #fff;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 1.05em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+}
+
+#join-panel button:hover {
+  background: #219150;
+  transform: translateY(-2px);
+}
+
+#join-panel button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+}
+
+/* Join status */
+#join-status {
+  font-size: 0.95em;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+#join-status.connecting {
+  color: #f39c12; /* orange */
+}
+
+#join-status.connected {
+  color: #27ae60; /* green */
+}
+
+#join-status.error {
+  color: #e74c3c; /* red */
 }
