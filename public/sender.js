@@ -11,14 +11,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const sendBtn = document.getElementById('send-btn');
   const cancelBtn = document.getElementById('cancel-btn');
   const filesList = document.getElementById('files-list');
+  const selectedFilesList = document.getElementById('selected-files-list');
 
   const receivers = new Map(); // Map of receiverId -> { pc, dataChannel }
-  let files = [];
+  let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
+  let isSending = false;
 
   function showToast(msg, type = "info") {
-    let bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
+    const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
 
@@ -51,7 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
     receivers.set(receiverSocketId, { pc, dataChannel });
   });
 
-  // Set remote answer for a specific receiver
+  // Set remote answer
   socket.on('answer', async ({ from, answer }) => {
     const conn = receivers.get(from);
     if (!conn) return;
@@ -65,7 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
   });
 
-  // Handle receiver disconnect
+  // Receiver disconnect
   socket.on('receiver-disconnect', ({ receiverId }) => {
     const conn = receivers.get(receiverId);
     if (!conn) return;
@@ -85,22 +87,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // File selection
   fileInput.addEventListener('change', () => {
-    files = Array.from(fileInput.files);
-    const totalSize = files.reduce((acc, f) => acc + f.size, 0);
-    fileMetrics.textContent = `Files Selected: ${files.length} | Total Size: ${totalSize} B`;
-    sendBtn.disabled = files.length === 0;
-    cancelBtn.disabled = files.length === 0;
-    showToast(`${files.length} file(s) selected`);
+    const selectedFiles = Array.from(fileInput.files);
+    filesQueue.push(...selectedFiles);
+
+    // Update UI metrics
+    const totalSize = filesQueue.reduce((acc, f) => acc + f.size, 0);
+    fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize} B`;
+    sendBtn.disabled = filesQueue.length === 0;
+    cancelBtn.disabled = filesQueue.length === 0;
+
+    // Show selected files
+    selectedFilesList.innerHTML = '';
+    filesQueue.forEach(file => {
+      const div = document.createElement('div');
+      div.className = 'selected-file';
+      div.textContent = file.name;
+      selectedFilesList.appendChild(div);
+    });
+
+    fileInput.value = '';
+    showToast(`${selectedFiles.length} file(s) added to queue`);
   });
 
-  // Send files to all receivers
-  sendBtn.addEventListener('click', () => {
-    if (!receivers.size || !files.length) return;
+  // Send files sequentially
+  sendBtn.addEventListener('click', async () => {
+    if (!receivers.size || !filesQueue.length || isSending) return;
+    isSending = true;
 
-    files.forEach(file => {
+    while (filesQueue.length) {
+      const file = filesQueue.shift();
+      await sendFile(file);
+    }
+
+    isSending = false;
+    selectedFilesList.innerHTML = '';
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    showToast("All files sent!", "success");
+  });
+
+  async function sendFile(file) {
+    return new Promise((resolve) => {
       const meta = { filename: file.name, size: file.size, type: file.type };
 
-      // UI
+      // UI for progress
       const row = document.createElement('div');
       row.className = 'file-entry';
       row.innerHTML = `
@@ -109,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
       filesList.appendChild(row);
 
-      // Send header to all receivers
+      // Send header
       receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "header", meta })));
 
       const chunkSize = 16384;
@@ -118,7 +149,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
       reader.onload = e => {
         receivers.forEach(({ dataChannel }) => dataChannel.send(e.target.result));
-
         offset += e.target.result.byteLength;
         const pct = Math.floor((offset / file.size) * 100);
         row.querySelector('.progress-bar-fill').style.width = pct + '%';
@@ -129,6 +159,7 @@ document.addEventListener('DOMContentLoaded', () => {
           totalSentFiles++;
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
+          resolve();
         }
       };
 
@@ -139,26 +170,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
       readSlice(0);
     });
-
-    files = [];
-    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
-    fileInput.value = '';
-    sendBtn.disabled = true;
-    cancelBtn.disabled = true;
-    showToast("Sending files...", "info");
-  });
+  }
 
   // Cancel selection
   cancelBtn.addEventListener('click', () => {
-    files = [];
+    filesQueue = [];
+    selectedFilesList.innerHTML = '';
     fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
-    fileInput.value = '';
     sendBtn.disabled = true;
     cancelBtn.disabled = true;
     showToast("File selection canceled", "error");
   });
 
-  // Copy room ID
+  // Copy Room ID
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
     navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast("Room ID copied!", "success"));

@@ -13,7 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let pc = null;
   let dataChannel = null;
-  let incoming = { buffer: [], meta: null, received: 0, row: null };
+  let fileQueue = [];
+  let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
   const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
@@ -72,21 +73,18 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'header') initIncomingFile(msg.meta);
-      else if (msg.type === 'done') finishIncomingFile();
+      if (msg.type === 'header') startNextFile(msg.meta);
+      else if (msg.type === 'done') finishCurrentFile();
     } else {
-      incoming.buffer.push(e.data);
-      incoming.received += e.data.byteLength;
+      if (!currentFile) return;
+      currentFile.buffer.push(e.data);
+      currentFile.received += e.data.byteLength;
       updateProgress();
-      if (incoming.received >= incoming.meta.size) finishIncomingFile();
+      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
 
-  function initIncomingFile(meta) {
-    incoming.meta = meta;
-    incoming.buffer = [];
-    incoming.received = 0;
-
+  function startNextFile(meta) {
     const row = document.createElement('div');
     row.className = 'file-entry';
     row.innerHTML = `
@@ -94,35 +92,38 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="progress-bar"><div class="progress-bar-fill"></div></div>
     `;
     receivedFiles.appendChild(row);
-    incoming.row = row;
+
+    const fileObj = { meta, buffer: [], received: 0, row };
+    if (!currentFile) currentFile = fileObj;
+    else fileQueue.push(fileObj);
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
-    if (!incoming.row) return;
-    const pct = Math.floor((incoming.received / incoming.meta.size) * 100);
-    incoming.row.querySelector('.progress-bar-fill').style.width = pct + '%';
+    if (!currentFile || !currentFile.row) return;
+    const pct = Math.floor((currentFile.received / currentFile.meta.size) * 100);
+    currentFile.row.querySelector('.progress-bar-fill').style.width = pct + '%';
   }
 
-  function finishIncomingFile() {
-    if (!incoming.meta) return;
+  function finishCurrentFile() {
+    if (!currentFile) return;
 
-    const blob = new Blob(incoming.buffer, { type: incoming.meta.type });
+    const blob = new Blob(currentFile.buffer, { type: currentFile.meta.type });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = incoming.meta.filename;
+    a.download = currentFile.meta.filename;
     a.click();
 
-    incoming.row.querySelector('.progress-bar-fill').style.width = '100%';
+    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
 
     totalFiles++;
-    totalBytes += incoming.meta.size;
+    totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
 
-    showToast(`File received: ${incoming.meta.filename}`, 'success');
+    showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    incoming = { buffer: [], meta: null, received: 0, row: null };
+    currentFile = fileQueue.shift() || null;
   }
 
   // Copy Room ID
@@ -151,5 +152,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     dataChannel = null;
     pc = null;
+    currentFile = null;
+    fileQueue = [];
+    totalFiles = 0;
+    totalBytes = 0;
   });
 });
