@@ -19,11 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
   function showToast(msg, type = "info") {
-    let bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
+    const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
 
-  // Join room
   joinBtn.addEventListener('click', () => {
     const roomId = joinInput.value.trim();
     if (!roomId) return showToast('Enter Room ID', 'error');
@@ -44,18 +43,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     pc = new RTCPeerConnection(rtcConfig);
 
-    pc.onicecandidate = event => {
-      if (event.candidate) socket.emit('ice-candidate', { to: from, candidate: event.candidate });
-    };
+    pc.onicecandidate = e => { if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate }); };
 
-    pc.ondatachannel = event => {
-      dataChannel = event.channel;
+    // DEBUG: ICE / connection state
+    pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
+
+    pc.ondatachannel = e => {
+      dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
+
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
-        showToast("Ready to receive files!", 'success');
+        showToast("Ready to receive files!", "success");
       };
+
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -87,10 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function startNextFile(meta) {
     const row = document.createElement('div');
     row.className = 'file-entry';
-    row.innerHTML = `
-      <div class="fname">${meta.filename}</div>
-      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
-    `;
+    row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
@@ -102,13 +102,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    const pct = Math.floor((currentFile.received / currentFile.meta.size) * 100);
-    currentFile.row.querySelector('.progress-bar-fill').style.width = pct + '%';
+    currentFile.row.querySelector('.progress-bar-fill').style.width = `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
   }
 
   function finishCurrentFile() {
     if (!currentFile) return;
-
     const blob = new Blob(currentFile.buffer, { type: currentFile.meta.type });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -116,25 +114,21 @@ document.addEventListener('DOMContentLoaded', () => {
     a.click();
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
-
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
-
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
     currentFile = fileQueue.shift() || null;
   }
 
-  // Copy Room ID
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
     navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast(`Room ID copied!`, 'success'))
+      .then(() => showToast('Room ID copied!', 'success'))
       .catch(() => showToast('Failed to copy', 'error'));
   });
 
-  // Disconnect button functionality
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
