@@ -1,0 +1,9 @@
+body { font-family: system-ui, Arial; background:#f7f7fb; color:#111; }
+.container { max-width:600px; margin:40px auto; padding:20px; background:#fff; border-radius:8px; box-shadow:0 6px 18px rgba(20,20,40,0.06); text-align:center; }
+button, input { padding:10px 12px; margin:8px 4px; font-size:15px; }
+.hidden { display:none; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.files-list, #received-files { margin-top:16px; text-align:left; }
+.file-entry, .incoming-entry { display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border:1px solid #eee; border-radius:6px; margin-bottom:8px; background:#fafafa; }
+.fname { font-weight:600; }
+.progress { color: #0a84ff; font-weight:600; }

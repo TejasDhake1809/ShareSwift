@@ -1,0 +1,28 @@
+<!-- public/receiver.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ShareSwift — Receiver</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>ShareSwift — Receiver</h1>
+
+    <div id="join-panel">
+      <input type="text" id="join-room-input" placeholder="Enter Room ID" />
+      <button id="join-room-btn">Join Room</button>
+      <div id="join-status" class="mono"></div>
+    </div>
+
+    <div id="receive-panel" class="hidden">
+      <div>Room: <span id="room-display" class="mono"></span></div>
+      <div id="received-files"></div>
+    </div>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="receiver.js"></script>
+</body>
+</html>

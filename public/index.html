@@ -1,0 +1,28 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ShareSwift — Sender</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>ShareSwift — Sender</h1>
+
+    <div id="create-panel">
+      <button id="create-room-btn">Create Room</button>
+      <div id="room-display" class="mono">Room: —</div>
+    </div>
+
+    <div id="share-panel" class="hidden">
+      <div>Room: <span id="room-display-persistent" class="mono"></span></div>
+      <input type="file" id="file-input" />
+      <div class="files-list" id="files-list"></div>
+    </div>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="sender.js"></script>
+</body>
+</html>
