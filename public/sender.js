@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); // Map of receiverId -> { pc, dataChannel }
+  const receivers = new Map(); // Map of receiverId -> { pc, dataChannel, queue: [] }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
@@ -39,7 +39,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const dataChannel = pc.createDataChannel("files");
     dataChannel.binaryType = "arraybuffer";
 
-    dataChannel.onopen = () => showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
+    const queue = [];
+    receivers.set(receiverSocketId, { pc, dataChannel, queue });
+
+    dataChannel.onopen = () => {
+      showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
+      // Send queued messages
+      while (queue.length) {
+        dataChannel.send(queue.shift());
+      }
+    };
+
     dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
 
     pc.onicecandidate = event => {
@@ -49,8 +59,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
-
-    receivers.set(receiverSocketId, { pc, dataChannel });
   });
 
   // Set remote answer
@@ -77,7 +85,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     receivers.delete(receiverId);
     showToast(`Receiver ${receiverId} disconnected`, "error");
-
     peerStatus.textContent = `Connected peers: ${receivers.size}`;
   });
 
@@ -140,22 +147,35 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
       filesList.appendChild(row);
 
-      // Send header
-      receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "header", meta })));
+      // Send header with queue fallback
+      receivers.forEach(({ dataChannel, queue }) => {
+        const header = JSON.stringify({ type: "header", meta });
+        if (dataChannel.readyState === "open") dataChannel.send(header);
+        else queue.push(header);
+      });
 
       const chunkSize = 16384;
       let offset = 0;
       const reader = new FileReader();
 
       reader.onload = e => {
-        receivers.forEach(({ dataChannel }) => dataChannel.send(e.target.result));
+        receivers.forEach(({ dataChannel, queue }) => {
+          if (dataChannel.readyState === "open") dataChannel.send(e.target.result);
+          else queue.push(e.target.result);
+        });
+
         offset += e.target.result.byteLength;
         const pct = Math.floor((offset / file.size) * 100);
         row.querySelector('.progress-bar-fill').style.width = pct + '%';
 
         if (offset < file.size) readSlice(offset);
         else {
-          receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "done" })));
+          receivers.forEach(({ dataChannel, queue }) => {
+            const done = JSON.stringify({ type: "done" });
+            if (dataChannel.readyState === "open") dataChannel.send(done);
+            else queue.push(done);
+          });
+
           totalSentFiles++;
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
