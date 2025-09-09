@@ -12,36 +12,31 @@ document.addEventListener('DOMContentLoaded', () => {
   let pc = null;
   let dataChannel = null;
   let incoming = { buffer: [], meta: null, received: 0, row: null };
+  let totalFiles = 0, totalBytes = 0;
   const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-  let totalFiles = 0;
-  let totalBytes = 0;
+  function showToast(msg, type = "info") {
+    let bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
+    Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
+  }
 
-  // Join room button
   joinBtn.addEventListener('click', () => {
     const roomId = joinInput.value.trim();
-    if (!roomId) {
-      joinStatus.textContent = 'Enter Room ID';
-      joinStatus.className = 'error';
-      return;
-    }
+    if (!roomId) return showToast('Enter Room ID', 'error');
     joinStatus.textContent = 'Joining...';
-    joinStatus.className = 'connecting';
     socket.emit('receiver-join', { roomId });
   });
 
-  // No sender found
   socket.on('no-sender', ({ message }) => {
     joinStatus.textContent = message;
-    joinStatus.className = 'error';
+    showToast(message, 'error');
   });
 
-  // Receive offer
   socket.on('offer', async ({ from, offer }) => {
     const roomId = joinInput.value.trim();
     roomDisplay.textContent = roomId;
     joinStatus.textContent = 'Connected';
-    joinStatus.className = 'connected';
+    showToast(`Connected to room ${roomId}`, 'success');
 
     pc = new RTCPeerConnection(rtcConfig);
 
@@ -52,14 +47,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pc.ondatachannel = event => {
       dataChannel = event.channel;
       dataChannel.binaryType = 'arraybuffer';
-      dataChannel.onopen = () => receivePanel.classList.remove('hidden');
-      dataChannel.onmessage = handleDataMessage;
-
-      // Handle disconnects
-      dataChannel.onclose = () => {
-        joinStatus.textContent = 'Disconnected';
-        joinStatus.className = 'disconnected';
+      dataChannel.onopen = () => {
+        receivePanel.classList.remove('hidden');
+        showToast("Ready to receive files!", 'success');
       };
+      dataChannel.onmessage = handleDataMessage;
     };
 
     await pc.setRemoteDescription(offer);
@@ -73,7 +65,6 @@ document.addEventListener('DOMContentLoaded', () => {
     try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
   });
 
-  // Handle incoming data
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
@@ -100,13 +91,14 @@ document.addEventListener('DOMContentLoaded', () => {
     `;
     receivedFiles.appendChild(row);
     incoming.row = row;
+
+    showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
     if (!incoming.row) return;
     const pct = Math.floor((incoming.received / incoming.meta.size) * 100);
-    const fill = incoming.row.querySelector('.progress-bar-fill');
-    fill.style.width = pct + '%';
+    incoming.row.querySelector('.progress-bar-fill').style.width = pct + '%';
   }
 
   function finishIncomingFile() {
@@ -118,21 +110,21 @@ document.addEventListener('DOMContentLoaded', () => {
     a.download = incoming.meta.filename;
     a.click();
 
-    updateProgress();
     incoming.row.querySelector('.progress-bar-fill').style.width = '100%';
 
-    totalFiles += 1;
+    totalFiles++;
     totalBytes += incoming.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+
+    showToast(`File received: ${incoming.meta.filename}`, 'success');
 
     incoming = { buffer: [], meta: null, received: 0, row: null };
   }
 
-  // Click-to-copy room ID
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
     navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => alert(`Room ID ${roomDisplay.textContent} copied to clipboard!`))
-      .catch(err => console.error('Failed to copy room ID', err));
+      .then(() => showToast(`Room ID copied!`, 'success'))
+      .catch(() => showToast('Failed to copy', 'error'));
   });
 });

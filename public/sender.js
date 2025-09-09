@@ -1,182 +1,124 @@
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
 
-  const createBtn = document.getElementById('create-room-btn');
-  const persistentRoom = document.getElementById('room-display-persistent');
+  const createRoomBtn = document.getElementById('create-room-btn');
   const sharePanel = document.getElementById('share-panel');
-  const fileInput = document.getElementById('file-input');
-  const filesList = document.getElementById('files-list');
-  const sendBtn = document.getElementById('send-btn');
-  const cancelBtn = document.getElementById('cancel-btn');
+  const roomDisplay = document.getElementById('room-display-persistent');
   const peerStatus = document.getElementById('peer-status');
   const fileMetrics = document.getElementById('file-metrics');
+  const fileInput = document.getElementById('file-input');
+  const sendBtn = document.getElementById('send-btn');
+  const cancelBtn = document.getElementById('cancel-btn');
 
-  let roomId = null;
-  const peers = new Map(); // receiverSocketId -> { pc, dataChannel }
-  let selectedFiles = [];
-  let sending = false;
-  const chunkSize = 16 * 1024;
-  const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  let pc = null;
+  let dataChannel = null;
+  let files = [];
+  let totalSize = 0;
+  let receiverId = null;
 
-  /* --- FILE ROW MAP --- */
-  // Map file -> DOM row
-  const fileRows = new Map();
+  function showToast(msg, type = "info") {
+    let bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
+    Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
+  }
 
-  /* --- ROOM & PEER --- */
-  createBtn.addEventListener('click', () => {
-    roomId = generateRoomId();
-    persistentRoom.textContent = roomId;
-    socket.emit('sender-join', { roomId });
+  // Create Room
+  createRoomBtn.addEventListener('click', () => socket.emit('create-room'));
+
+  socket.on('room-created', ({ roomId }) => {
+    roomDisplay.textContent = roomId;
     sharePanel.classList.remove('hidden');
-    updatePeerStatus();
+    showToast(`Room ${roomId} created`, "success");
   });
 
-  socket.on('connect', () => console.log('Connected to signaling server:', socket.id));
+  // Init receiver connection
+  socket.on('init', async ({ receiverSocketId }) => {
+    receiverId = receiverSocketId;
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
-  persistentRoom.addEventListener('click', () => {
-    if (!persistentRoom.textContent) return;
-    navigator.clipboard.writeText(persistentRoom.textContent)
-      .then(() => alert(`Room ID ${persistentRoom.textContent} copied to clipboard!`))
-      .catch(err => console.error('Failed to copy room ID', err));
-  });
+    dataChannel = pc.createDataChannel("files");
+    dataChannel.binaryType = "arraybuffer";
 
-  socket.on('init', async ({ receiverSocketId: rId }) => {
-    const pc = new RTCPeerConnection(rtcConfig);
-    const dataChannel = pc.createDataChannel('file');
-    dataChannel.binaryType = 'arraybuffer';
-
-    dataChannel.onopen = () => console.log('DataChannel open for', rId);
-    dataChannel.onclose = () => {
-      console.log('DataChannel closed for', rId);
-      peers.delete(rId);
-      updatePeerStatus();
-    };
+    dataChannel.onopen = () => showToast("Data channel open", "success");
+    dataChannel.onmessage = e => console.log("Received from peer:", e.data);
 
     pc.onicecandidate = event => {
-      if (event.candidate) socket.emit('ice-candidate', { to: rId, candidate: event.candidate });
+      if (event.candidate && receiverId) socket.emit('ice-candidate', { to: receiverId, candidate: event.candidate });
     };
 
-    peers.set(rId, { pc, dataChannel });
-    updatePeerStatus();
-
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit('offer', { to: rId, offer });
-      console.log('Offer sent to receiver', rId);
-    } catch (err) { console.error(err); }
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('offer', { to: receiverId, offer: pc.localDescription });
   });
 
-  socket.on('answer', async ({ from, answer }) => {
-    const peer = peers.get(from);
-    if (!peer) return;
-    await peer.pc.setRemoteDescription(answer);
+  socket.on('answer', async ({ answer }) => {
+    if (!pc) return;
+    await pc.setRemoteDescription(answer);
+    showToast("Receiver connected", "success");
   });
 
-  socket.on('ice-candidate', async ({ from, candidate }) => {
-    const peer = peers.get(from);
-    if (!peer || !candidate) return;
-    try { await peer.pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
+  socket.on('ice-candidate', async ({ candidate }) => {
+    if (pc && candidate) await pc.addIceCandidate(candidate).catch(err => console.warn(err));
   });
 
-  /* --- FILE SELECTION --- */
-  fileInput.addEventListener('change', e => {
-    selectedFiles = Array.from(e.target.files);
-    sendBtn.disabled = selectedFiles.length === 0 || peers.size === 0;
-    cancelBtn.disabled = selectedFiles.length === 0;
-    updateFileMetrics();
-    renderFileList();
+  // File selection
+  fileInput.addEventListener('change', () => {
+    files = Array.from(fileInput.files);
+    totalSize = files.reduce((acc, f) => acc + f.size, 0);
+    fileMetrics.textContent = `Files Selected: ${files.length} | Total Size: ${totalSize} B`;
+    sendBtn.disabled = files.length === 0;
+    cancelBtn.disabled = files.length === 0;
+    showToast(`${files.length} file(s) selected`);
   });
 
-  function updateFileMetrics() {
-    const totalSize = selectedFiles.reduce((acc, f) => acc + f.size, 0);
-    fileMetrics.textContent = `Files Selected: ${selectedFiles.length} | Total Size: ${formatBytes(totalSize)}`;
-  }
-
-  function renderFileList() {
-    filesList.innerHTML = '';
-    fileRows.clear();
-    selectedFiles.forEach(file => {
-      const row = document.createElement('div');
-      row.className = 'file-entry';
-      row.innerHTML = `
-        <div class="fname">${file.name}</div>
-        <div class="progress-bar"><div class="progress-bar-fill"></div></div>
-      `;
-      filesList.appendChild(row);
-      fileRows.set(file, row);
-    });
-  }
-
-  /* --- SEND / CANCEL --- */
+  // Send files
   sendBtn.addEventListener('click', () => {
-    if (selectedFiles.length === 0) return;
-    sending = true;
-    sendBtn.disabled = true;
-    cancelBtn.disabled = false;
-    selectedFiles.forEach(file => sendFileToAll(file));
-  });
+    if (!dataChannel || !files.length) return;
 
-  cancelBtn.addEventListener('click', () => {
-    sending = false;
-    sendBtn.disabled = selectedFiles.length === 0 || peers.size === 0;
-    cancelBtn.disabled = true;
-    filesList.innerHTML = '';
-    fileRows.clear();
-  });
+    files.forEach(file => {
+      const meta = { filename: file.name, size: file.size, type: file.type };
+      dataChannel.send(JSON.stringify({ type: "header", meta }));
 
-  /* --- SEND FILE LOGIC --- */
-  async function sendFileToAll(file) {
-    const meta = { filename: file.name, size: file.size, type: file.type || 'application/octet-stream' };
-    const buffer = await file.arrayBuffer();
-    const row = fileRows.get(file);
-    const progressFill = row?.querySelector('.progress-bar-fill');
-
-    peers.forEach(({ dataChannel }) => {
-      if (!dataChannel || dataChannel.readyState !== 'open') return;
-
-      dataChannel.send(JSON.stringify({ type: 'header', meta }));
-
+      const chunkSize = 16384;
       let offset = 0;
+      const reader = new FileReader();
 
-      function sendChunk() {
-        if (!sending) return;
-        if (dataChannel.bufferedAmount > 1 * 1024 * 1024) {
-          dataChannel.onbufferedamountlow = () => {
-            dataChannel.onbufferedamountlow = null;
-            sendChunk();
-          };
-          return;
-        }
-        const end = Math.min(offset + chunkSize, buffer.byteLength);
-        dataChannel.send(buffer.slice(offset, end));
-        offset = end;
+      reader.onload = e => {
+        dataChannel.send(e.target.result);
+        offset += e.target.result.byteLength;
+        if (offset < file.size) readSlice(offset);
+        else dataChannel.send(JSON.stringify({ type: "done" }));
+      };
 
-        if (progressFill) progressFill.style.width = Math.floor((offset / buffer.byteLength) * 100) + '%';
-
-        if (offset < buffer.byteLength) setTimeout(sendChunk, 0);
-        else dataChannel.send(JSON.stringify({ type: 'done' }));
+      function readSlice(o) {
+        const slice = file.slice(o, o + chunkSize);
+        reader.readAsArrayBuffer(slice);
       }
 
-      sendChunk();
+      readSlice(0);
     });
-  }
 
-  /* --- UTILS --- */
-  function updatePeerStatus() {
-    peerStatus.textContent = `Connected peers: ${peers.size}`;
-    sendBtn.disabled = selectedFiles.length === 0 || peers.size === 0;
-  }
+    files = [];
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    fileInput.value = '';
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    showToast("Files sent", "success");
+  });
 
-  function generateRoomId() {
-    return `${Math.trunc(Math.random() * 900000) + 100000}`;
-  }
+  // Cancel selection
+  cancelBtn.addEventListener('click', () => {
+    files = [];
+    totalSize = 0;
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    fileInput.value = '';
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    showToast("File selection canceled", "error");
+  });
 
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  }
+  // Copy room ID
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast("Room ID copied!", "success"));
+  });
 });
