@@ -1,4 +1,3 @@
-// public/sender.js
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
 
@@ -9,175 +8,114 @@ document.addEventListener('DOMContentLoaded', () => {
   const fileInput = document.getElementById('file-input');
   const filesList = document.getElementById('files-list');
 
+  const peerStatus = document.createElement('div');
+  peerStatus.id = 'peer-status';
+  sharePanel.prepend(peerStatus);
+
   let roomId = null;
-  let pc = null;
-  let dataChannel = null;
-  let receiverSocketId = null;
-
-  // STUN config
-  const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'turn:your-turn-server.com:3478', username: 'user', credential: 'pass' }
-  ]
-};
-
+  const peers = new Map(); // receiverSocketId -> { pc, dataChannel }
+  const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
   createBtn.addEventListener('click', () => {
     roomId = generateRoomId();
-    roomDisplay.textContent = `Room: ${roomId}`;
+    // roomDisplay.textContent = `Room: ${roomId}`;
     persistentRoom.textContent = roomId;
     socket.emit('sender-join', { roomId });
-    // show share UI so user can prepare file
     sharePanel.classList.remove('hidden');
+    peerStatus.textContent = 'Connected peers: 0';
   });
 
-  socket.on('connect', () => {
-    console.log('Connected to signaling server:', socket.id);
-  });
+  socket.on('connect', () => console.log('Connected to signaling server:', socket.id));
 
   socket.on('init', async ({ receiverSocketId: rId }) => {
     console.log('Receiver joined:', rId);
-    receiverSocketId = rId;
-    // Create RTCPeerConnection + DataChannel as sender (initiator)
-    pc = new RTCPeerConnection(rtcConfig);
 
-    // create data channel for file transfer
-    dataChannel = pc.createDataChannel('file');
+    const pc = new RTCPeerConnection(rtcConfig);
+    const dataChannel = pc.createDataChannel('file');
     dataChannel.binaryType = 'arraybuffer';
 
-    dataChannel.onopen = () => {
-      console.log('DataChannel open');
-      // UI: ready to send files
+    dataChannel.onopen = () => console.log('DataChannel open for', rId);
+    dataChannel.onclose = () => {
+      console.log('DataChannel closed for', rId);
+      peers.delete(rId);
+      peerStatus.textContent = `Connected peers: ${peers.size}`;
     };
-
-    dataChannel.onclose = () => console.log('DataChannel closed');
 
     pc.onicecandidate = event => {
-      if (event.candidate) {
-        socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
-      }
+      if (event.candidate) socket.emit('ice-candidate', { to: rId, candidate: event.candidate });
     };
 
-    // Create offer
+    peers.set(rId, { pc, dataChannel });
+    peerStatus.textContent = `Connected peers: ${peers.size}`;
+
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      socket.emit('offer', { to: receiverSocketId, offer });
-      console.log('Offer sent to receiver');
+      socket.emit('offer', { to: rId, offer });
+      console.log('Offer sent to receiver', rId);
     } catch (err) {
       console.error('Failed to create/send offer', err);
     }
   });
 
-  // Receiver will send answer
   socket.on('answer', async ({ from, answer }) => {
-    if (!pc) {
-      console.warn('No pc to set remote answer on');
-      return;
-    }
+    const peer = peers.get(from);
+    if (!peer) return;
     try {
-      // setRemoteDescription only when have-local-offer
-      if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'stable') {
-        await pc.setRemoteDescription(answer);
-        console.log('Remote answer set');
-      } else {
-        // attempt anyway
-        await pc.setRemoteDescription(answer);
-      }
+      await peer.pc.setRemoteDescription(answer);
+      console.log('Remote answer set for', from);
     } catch (err) {
-      console.error('Error setting remote answer', err);
+      console.error('Error setting remote answer for', from, err);
     }
   });
 
   socket.on('ice-candidate', async ({ from, candidate }) => {
-    if (!pc || !candidate) return;
-    try {
-      await pc.addIceCandidate(candidate);
-    } catch (err) {
-      console.warn('Error adding remote ICE candidate', err);
-    }
+    const peer = peers.get(from);
+    if (!peer || !candidate) return;
+    try { await peer.pc.addIceCandidate(candidate); } 
+    catch (err) { console.warn('Error adding ICE candidate for', from, err); }
   });
 
-  socket.on('no-sender', ({ message }) => {
-    alert(message || 'No sender found for that room ID');
-  });
-
-  // file selection -> send file via data channel (header + binary chunks + done)
   fileInput.addEventListener('change', e => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!dataChannel || dataChannel.readyState !== 'open') {
-      alert('Receiver not connected yet. Wait until receiver joins and the connection is established.');
-      return;
-    }
 
     const meta = { filename: file.name, size: file.size, type: file.type || 'application/octet-stream' };
-    // display entry
-    const entry = createFileEntry(file.name);
-    // send header
-    dataChannel.send(JSON.stringify({ type: 'header', meta }));
+    const chunkSize = 16 * 1024;
 
-    const chunkSize = 16 * 1024; // 16KB
-    const reader = new FileReader();
-    let offset = 0;
+    peers.forEach(({ dataChannel }, rId) => {
+      if (!dataChannel || dataChannel.readyState !== 'open') return;
+      dataChannel.send(JSON.stringify({ type: 'header', meta }));
 
-    reader.onload = () => {
-      const buffer = new Uint8Array(reader.result);
+      const reader = new FileReader();
+      let offset = 0;
 
-      function sendNextChunk() {
-        // backpressure: if bufferedAmount is large, wait
-        if (dataChannel.bufferedAmount > 1 * 1024 * 1024) { // 1MB
-          dataChannel.onbufferedamountlow = () => {
-            dataChannel.onbufferedamountlow = null;
-            sendNextChunk();
-          };
-          return;
+      reader.onload = () => {
+        const buffer = new Uint8Array(reader.result);
+
+        function sendNextChunk() {
+          if (dataChannel.bufferedAmount > 1 * 1024 * 1024) {
+            dataChannel.onbufferedamountlow = () => {
+              dataChannel.onbufferedamountlow = null;
+              sendNextChunk();
+            };
+            return;
+          }
+          const end = Math.min(offset + chunkSize, buffer.length);
+          dataChannel.send(buffer.slice(offset, end));
+          offset = end;
+          if (offset < buffer.length) setTimeout(sendNextChunk, 0);
+          else dataChannel.send(JSON.stringify({ type: 'done' }));
         }
 
-        const end = Math.min(offset + chunkSize, buffer.length);
-        const slice = buffer.slice(offset, end);
-        dataChannel.send(slice);
-        offset = end;
+        sendNextChunk();
+      };
 
-        const sentPct = Math.floor((offset / buffer.length) * 100);
-        updateFileEntry(entry, sentPct);
-
-        if (offset < buffer.length) {
-          // schedule next chunk
-          setTimeout(sendNextChunk, 0);
-        } else {
-          // done
-          dataChannel.send(JSON.stringify({ type: 'done' }));
-          updateFileEntry(entry, 100, true);
-        }
-      }
-
-      sendNextChunk();
-    };
-
-    reader.readAsArrayBuffer(file);
+      reader.readAsArrayBuffer(file);
+    });
   });
 
-  // helpers
   function generateRoomId() {
-    return `${Math.trunc(Math.random() * 900000) + 100000}`; // 6-digit
-  }
-
-  function createFileEntry(name) {
-    const el = document.createElement('div');
-    el.className = 'file-entry';
-    el.innerHTML = `<div class="fname">${escapeHtml(name)}</div><div class="progress">0%</div>`;
-    filesList.appendChild(el);
-    return el;
-  }
-
-  function updateFileEntry(el, pct, done = false) {
-    const p = el.querySelector('.progress');
-    p.textContent = (done ? 'Done' : `${pct}%`);
-  }
-
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return `${Math.trunc(Math.random() * 900000) + 100000}`;
   }
 });
