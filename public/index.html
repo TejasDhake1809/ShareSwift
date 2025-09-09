@@ -7,7 +7,6 @@
 
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
   <script src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
-  
 </head>
 <body>
   <main class="container">
@@ -25,11 +24,12 @@
       <div class="metrics">
         <div id="peer-status" class="mono">Connected peers: 0</div>
         <div id="file-metrics" class="mono">Files Selected: 0 | Total Size: 0 B</div>
+        <div id="sent-metrics" class="mono">Files Sent: 0 | Total Bytes: 0</div>
       </div>
 
       <label class="file-input-label">
         Choose File
-        <input type="file" id="file-input" />
+        <input type="file" id="file-input" multiple />
       </label>
 
       <div class="file-actions">
@@ -37,6 +37,7 @@
         <button id="cancel-btn" disabled>Cancel</button>
       </div>
 
+      <h2 class="section-title">Sent Files</h2>
       <div class="files-list" id="files-list"></div>
     </div>
   </main>

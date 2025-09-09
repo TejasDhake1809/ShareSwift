@@ -11,8 +11,8 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Map roomId -> senderSocketId
-const senders = new Map();
+// Map roomId -> { sender: socketId, receivers: Set<socketId> }
+const rooms = new Map();
 
 io.on('connection', socket => {
   console.log('Socket connected:', socket.id);
@@ -20,7 +20,7 @@ io.on('connection', socket => {
   // Sender creates a room
   socket.on('create-room', () => {
     const roomId = uuidv4().slice(0, 6); // short 6-char ID
-    senders.set(roomId, socket.id);
+    rooms.set(roomId, { sender: socket.id, receivers: new Set() });
     socket.join(roomId);
     console.log(`Room created: ${roomId} by ${socket.id}`);
     socket.emit('room-created', { roomId });
@@ -28,13 +28,18 @@ io.on('connection', socket => {
 
   // Receiver joins a room
   socket.on('receiver-join', ({ roomId }) => {
-    const senderSocketId = senders.get(roomId);
-    if (senderSocketId) {
-      socket.join(roomId);
-      io.to(senderSocketId).emit('init', { receiverSocketId: socket.id });
-    } else {
-      socket.emit('no-sender', { message: 'No sender for that Room ID' });
-    }
+    const room = rooms.get(roomId);
+    if (!room) return socket.emit('no-sender', { message: 'No sender for that Room ID' });
+
+    room.receivers.add(socket.id);
+    socket.join(roomId);
+
+    // Notify sender about new receiver count
+    io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
+
+    // Initialize connection for new receiver
+    io.to(room.sender).emit('init', { receiverSocketId: socket.id });
+    console.log(`Receiver ${socket.id} joined room ${roomId}`);
   });
 
   // Relay offer/answer
@@ -44,9 +49,16 @@ io.on('connection', socket => {
 
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
-    for (const [roomId, sid] of senders.entries()) {
-      if (sid === socket.id) senders.delete(roomId);
-    }
+    rooms.forEach((room, roomId) => {
+      if (room.sender === socket.id) {
+        // Notify all receivers if needed (optional)
+        room.receivers.forEach(rid => io.to(rid).emit('sender-disconnected'));
+        rooms.delete(roomId);
+      } else if (room.receivers.has(socket.id)) {
+        room.receivers.delete(socket.id);
+        io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
+      }
+    });
   });
 });
 

@@ -6,15 +6,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const roomDisplay = document.getElementById('room-display-persistent');
   const peerStatus = document.getElementById('peer-status');
   const fileMetrics = document.getElementById('file-metrics');
+  const sentMetrics = document.getElementById('sent-metrics');
   const fileInput = document.getElementById('file-input');
   const sendBtn = document.getElementById('send-btn');
   const cancelBtn = document.getElementById('cancel-btn');
+  const filesList = document.getElementById('files-list');
 
-  let pc = null;
-  let dataChannel = null;
+  const receivers = new Map(); // Map of receiverId -> { pc, dataChannel }
   let files = [];
-  let totalSize = 0;
-  let receiverId = null;
+  let totalSentFiles = 0;
+  let totalSentBytes = 0;
 
   function showToast(msg, type = "info") {
     let bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -32,61 +33,89 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Init receiver connection
   socket.on('init', async ({ receiverSocketId }) => {
-    receiverId = receiverSocketId;
-    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-
-    dataChannel = pc.createDataChannel("files");
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    const dataChannel = pc.createDataChannel("files");
     dataChannel.binaryType = "arraybuffer";
 
-    dataChannel.onopen = () => showToast("Data channel open", "success");
-    dataChannel.onmessage = e => console.log("Received from peer:", e.data);
+    dataChannel.onopen = () => showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
+    dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
 
     pc.onicecandidate = event => {
-      if (event.candidate && receiverId) socket.emit('ice-candidate', { to: receiverId, candidate: event.candidate });
+      if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
     };
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    socket.emit('offer', { to: receiverId, offer: pc.localDescription });
+    socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
+
+    receivers.set(receiverSocketId, { pc, dataChannel });
   });
 
-  socket.on('answer', async ({ answer }) => {
-    if (!pc) return;
-    await pc.setRemoteDescription(answer);
-    showToast("Receiver connected", "success");
+  // Set remote answer for a specific receiver
+  socket.on('answer', async ({ from, answer }) => {
+    const conn = receivers.get(from);
+    if (!conn) return;
+    await conn.pc.setRemoteDescription(answer);
+    showToast(`Receiver ${from} connected`, "success");
   });
 
-  socket.on('ice-candidate', async ({ candidate }) => {
-    if (pc && candidate) await pc.addIceCandidate(candidate).catch(err => console.warn(err));
+  socket.on('ice-candidate', async ({ candidate, from }) => {
+    const conn = receivers.get(from);
+    if (!conn || !candidate) return;
+    await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
+  });
+
+  socket.on('update-receivers', ({ count }) => {
+    peerStatus.textContent = `Connected peers: ${count}`;
   });
 
   // File selection
   fileInput.addEventListener('change', () => {
     files = Array.from(fileInput.files);
-    totalSize = files.reduce((acc, f) => acc + f.size, 0);
+    const totalSize = files.reduce((acc, f) => acc + f.size, 0);
     fileMetrics.textContent = `Files Selected: ${files.length} | Total Size: ${totalSize} B`;
     sendBtn.disabled = files.length === 0;
     cancelBtn.disabled = files.length === 0;
     showToast(`${files.length} file(s) selected`);
   });
 
-  // Send files
+  // Send files to all receivers
   sendBtn.addEventListener('click', () => {
-    if (!dataChannel || !files.length) return;
+    if (!receivers.size || !files.length) return;
 
     files.forEach(file => {
       const meta = { filename: file.name, size: file.size, type: file.type };
-      dataChannel.send(JSON.stringify({ type: "header", meta }));
+
+      // UI
+      const row = document.createElement('div');
+      row.className = 'file-entry';
+      row.innerHTML = `
+        <div class="fname">${meta.filename}</div>
+        <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      `;
+      filesList.appendChild(row);
+
+      // Send header to all receivers
+      receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "header", meta })));
 
       const chunkSize = 16384;
       let offset = 0;
       const reader = new FileReader();
 
       reader.onload = e => {
-        dataChannel.send(e.target.result);
+        receivers.forEach(({ dataChannel }) => dataChannel.send(e.target.result));
+
         offset += e.target.result.byteLength;
+        const pct = Math.floor((offset / file.size) * 100);
+        row.querySelector('.progress-bar-fill').style.width = pct + '%';
+
         if (offset < file.size) readSlice(offset);
-        else dataChannel.send(JSON.stringify({ type: "done" }));
+        else {
+          receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "done" })));
+          totalSentFiles++;
+          totalSentBytes += file.size;
+          sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
+        }
       };
 
       function readSlice(o) {
@@ -102,13 +131,12 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.value = '';
     sendBtn.disabled = true;
     cancelBtn.disabled = true;
-    showToast("Files sent", "success");
+    showToast("Sending files...", "info");
   });
 
   // Cancel selection
   cancelBtn.addEventListener('click', () => {
     files = [];
-    totalSize = 0;
     fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
     fileInput.value = '';
     sendBtn.disabled = true;
