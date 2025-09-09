@@ -15,7 +15,22 @@
 
     <div id="share-panel" class="hidden">
       <div>Room: <span id="room-display-persistent" class="mono"></span></div>
-      <input type="file" id="file-input" />
+
+      <label class="file-input-label">
+        Choose File
+        <input type="file" id="file-input" />
+      </label>
+
+      <div class="file-actions">
+        <button id="send-btn" disabled>Send</button>
+        <button id="cancel-btn" disabled>Cancel</button>
+      </div>
+
+      <div class="metrics">
+        <div id="peer-status" class="mono">Connected peers: 0</div>
+        <div id="file-metrics" class="mono">Files selected: 0 | Total bytes: 0</div>
+      </div>
+
       <div class="files-list" id="files-list"></div>
     </div>
   </main>
