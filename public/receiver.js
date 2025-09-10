@@ -54,7 +54,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
 
-    // DEBUG: ICE / connection state
     pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
     pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
 
@@ -121,11 +120,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finishCurrentFile() {
     if (!currentFile) return;
-    const blob = new Blob(currentFile.buffer, { type: currentFile.meta.type });
+
+    // ✅ Force binary download instead of inline open
+    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
+    document.body.appendChild(a); // needed for iOS
     a.click();
+    document.body.removeChild(a);
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     totalFiles++;
