@@ -18,13 +18,18 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalFiles = 0, totalBytes = 0;
   const rtcConfig = {
           iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' }, // STUN server
+            { urls: "stun:stun.l.google.com:19302" },
             {
-              urls: 'turn:openrelay.metered.ca:443?transport=tcp', // free public TURN
-              username: 'openrelayproject',
-              credential: 'openrelayproject'
+              urls: [
+                "turn:openrelay.metered.ca:80?transport=tcp",
+                "turn:openrelay.metered.ca:443?transport=tcp",
+                "turn:openrelay.metered.ca:443?transport=udp"
+              ],
+              username: "openrelayproject",
+              credential: "openrelayproject"
             }
           ]
+
         };
 
 

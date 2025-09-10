@@ -35,13 +35,18 @@ document.addEventListener('DOMContentLoaded', () => {
   socket.on('init', async ({ receiverSocketId }) => {
     const pc = new RTCPeerConnection({
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' }, // STUN
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp', // TURN
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ]
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: [
+      "turn:openrelay.metered.ca:80?transport=tcp",
+      "turn:openrelay.metered.ca:443?transport=tcp",
+      "turn:openrelay.metered.ca:443?transport=udp"
+    ],
+    username: "openrelayproject",
+    credential: "openrelayproject"
+  }
+]
+
   });
 
     const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
