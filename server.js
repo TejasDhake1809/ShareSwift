@@ -4,6 +4,8 @@ const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
@@ -13,6 +15,27 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Map roomId -> { sender: socketId, receivers: Set<socketId> }
 const rooms = new Map();
+
+// Helper: fetch Twilio ICE servers
+async function getTwilioIceServers() {
+  try {
+    const response = await axios.post(
+      `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Tokens.json`,
+      {},
+      {
+        auth: {
+          username: process.env.TWILIO_ACCOUNT_SID,
+          password: process.env.TWILIO_AUTH_TOKEN,
+        },
+      }
+    );
+    return response.data.ice_servers;
+  } catch (err) {
+    console.error('Failed to fetch Twilio ICE servers:', err.message);
+    // fallback to only STUN
+    return [{ urls: 'stun:stun.l.google.com:19302' }];
+  }
+}
 
 io.on('connection', socket => {
   console.log('Socket connected:', socket.id);
@@ -27,25 +50,45 @@ io.on('connection', socket => {
   });
 
   // Receiver joins a room
-  socket.on('receiver-join', ({ roomId }) => {
+  socket.on('receiver-join', async ({ roomId }) => {
     const room = rooms.get(roomId);
-    if (!room) return socket.emit('no-sender', { message: 'No sender for that Room ID' });
+    if (!room) {
+      return socket.emit('no-sender', { message: 'No sender for that Room ID' });
+    }
 
     room.receivers.add(socket.id);
     socket.join(roomId);
+
+    // Fetch ICE servers
+    const iceServers = await getTwilioIceServers();
+
+    // Send ICE servers to this receiver
+    socket.emit('ice-config', { iceServers });
+
+    // Send ICE servers to sender too
+    io.to(room.sender).emit('ice-config', { iceServers });
 
     // Notify sender about new receiver count
     io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
 
     // Initialize connection for new receiver
     io.to(room.sender).emit('init', { receiverSocketId: socket.id });
+
     console.log(`Receiver ${socket.id} joined room ${roomId}`);
   });
 
   // Relay offer/answer and ICE candidates
-  socket.on('offer', ({ to, offer }) => io.to(to).emit('offer', { from: socket.id, offer }));
-  socket.on('answer', ({ to, answer }) => io.to(to).emit('answer', { from: socket.id, answer }));
-  socket.on('ice-candidate', ({ to, candidate }) => io.to(to).emit('ice-candidate', { from: socket.id, candidate }));
+  socket.on('offer', ({ to, offer }) => {
+    io.to(to).emit('offer', { from: socket.id, offer });
+  });
+
+  socket.on('answer', ({ to, answer }) => {
+    io.to(to).emit('answer', { from: socket.id, answer });
+  });
+
+  socket.on('ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  });
 
   // Receiver manually disconnects
   socket.on('receiver-disconnect', () => {
@@ -83,5 +126,6 @@ io.on('connection', socket => {
     });
   });
 });
+
 const PORT = process.env.PORT || 3000;
-server.listen(3000, () => console.log('Server running on port 3000'));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

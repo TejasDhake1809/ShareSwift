@@ -16,22 +16,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let fileQueue = [];
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
-  const rtcConfig = {
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            {
-              urls: [
-                "turn:openrelay.metered.ca:80?transport=tcp",
-                "turn:openrelay.metered.ca:443?transport=tcp",
-                "turn:openrelay.metered.ca:443?transport=udp"
-              ],
-              username: "openrelayproject",
-              credential: "openrelayproject"
-            }
-          ]
-
-        };
-
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -56,9 +40,19 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    pc = new RTCPeerConnection(rtcConfig);
+    // ✅ Fetch Twilio ICE servers dynamically
+    const iceServers = await fetch("/ice-servers")
+      .then(res => res.json())
+      .catch(err => {
+        console.error("Failed to fetch ICE servers:", err);
+        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+      });
 
-    pc.onicecandidate = e => { if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate }); };
+    pc = new RTCPeerConnection({ iceServers });
+
+    pc.onicecandidate = e => {
+      if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
+    };
 
     // DEBUG: ICE / connection state
     pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
@@ -85,7 +79,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
-    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn(err);
+    }
   });
 
   function handleDataMessage(e) {
@@ -117,7 +115,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    currentFile.row.querySelector('.progress-bar-fill').style.width = `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
+    currentFile.row.querySelector('.progress-bar-fill').style.width =
+      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
   }
 
   function finishCurrentFile() {
