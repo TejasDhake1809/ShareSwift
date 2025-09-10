@@ -13,6 +13,16 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get("/ice-servers", async (req, res) => {
+  try {
+    const iceServers = await getTwilioIceServers();
+    res.json(iceServers);
+  } catch (err) {
+    console.error("Error in /ice-servers:", err.message);
+    res.status(500).json([{ urls: "stun:stun.l.google.com:19302" }]);
+  }
+});
+
 // Map roomId -> { sender: socketId, receivers: Set<socketId> }
 const rooms = new Map();
 
