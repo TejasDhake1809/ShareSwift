@@ -13,11 +13,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
+  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [], ack: true }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
   let isSending = false;
+
+  const startTimeMap = new Map(); // fileName -> startTime
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -33,13 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('init', async ({ receiverSocketId }) => {
-    const iceServers = await fetch("/ice-servers")
-      .then(res => res.json())
-      .catch(err => {
-        console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
-      });
-
+    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
     dataChannel.binaryType = "arraybuffer";
@@ -53,9 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     dataChannel.onmessage = e => {
-      if (e.data === "ack") {
-        receivers.get(receiverSocketId).ack = true; // mark ready for next chunk
-      }
+      if (e.data === "ack") receivers.get(receiverSocketId).ack = true;
     };
 
     pc.onicecandidate = event => {
@@ -143,21 +137,17 @@ document.addEventListener('DOMContentLoaded', () => {
       const chunkSize = 16384;
       let offset = 0;
       const reader = new FileReader();
+      startTimeMap.set(file.name, performance.now());
 
       reader.onload = async e => {
         const chunk = e.target.result;
-
         for (const [id, conn] of receivers.entries()) {
           if (conn.dataChannel.readyState === "open") {
-            // wait if buffer is full OR receiver hasn't acked yet
-            while (
-              conn.dataChannel.bufferedAmount > 16 * 1024 * 1024 ||
-              !conn.ack
-            ) {
+            while (conn.dataChannel.bufferedAmount > 16 * 1024 * 1024 || !conn.ack) {
               await new Promise(r => setTimeout(r, 10));
             }
             conn.dataChannel.send(chunk);
-            conn.ack = false; // wait for ack before next chunk
+            conn.ack = false;
           }
         }
 
@@ -166,11 +156,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (offset < file.size) readSlice(offset);
         else {
+          const endTime = performance.now();
+          const duration = (endTime - startTimeMap.get(file.name)) / 1000;
+          const speed = (file.size / 1024 / 1024 / duration).toFixed(2);
+          console.log(`File ${file.name} sent in ${duration.toFixed(2)}s | Speed: ${speed} MB/s`);
+
           receivers.forEach(({ dataChannel, queue }) => {
             const done = JSON.stringify({ type: 'done' });
             if (dataChannel.readyState === 'open') dataChannel.send(done);
             else queue.push(done);
           });
+
           totalSentFiles++;
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
@@ -178,9 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       };
 
-      function readSlice(o) {
-        reader.readAsArrayBuffer(file.slice(o, o + chunkSize));
-      }
+      function readSlice(o) { reader.readAsArrayBuffer(file.slice(o, o + chunkSize)); }
       readSlice(0);
     });
   }

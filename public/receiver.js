@@ -17,6 +17,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
 
+  const startTimeMap = new Map(); // fileName -> startTime
+
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
@@ -40,13 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    const iceServers = await fetch("/ice-servers")
-      .then(res => res.json())
-      .catch(err => {
-        console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
-      });
-
+    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
@@ -74,11 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
-    try {
-      await pc.addIceCandidate(candidate);
-    } catch (err) {
-      console.warn(err);
-    }
+    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
   });
 
   function handleDataMessage(e) {
@@ -92,10 +84,8 @@ document.addEventListener('DOMContentLoaded', () => {
       currentFile.received += e.data.byteLength;
       updateProgress();
 
-      // send ack every chunk
-      if (dataChannel && dataChannel.readyState === "open") {
-        dataChannel.send("ack");
-      }
+      // send ack for each chunk
+      if (dataChannel && dataChannel.readyState === "open") dataChannel.send("ack");
 
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
@@ -111,6 +101,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!currentFile) currentFile = fileObj;
     else fileQueue.push(fileObj);
 
+    startTimeMap.set(meta.filename, performance.now());
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
@@ -130,12 +121,17 @@ document.addEventListener('DOMContentLoaded', () => {
     a.click();
     document.body.removeChild(a);
 
+    const endTime = performance.now();
+    const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
+    const speed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
+    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Speed: ${speed} MB/s`);
+
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
-    showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
+    showToast(`File received: ${currentFile.meta.filename}`, "success");
     currentFile = fileQueue.shift() || null;
   }
 
