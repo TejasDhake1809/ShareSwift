@@ -40,12 +40,11 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    // ✅ Fetch Twilio ICE servers dynamically
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       });
 
     pc = new RTCPeerConnection({ iceServers });
@@ -53,9 +52,6 @@ document.addEventListener('DOMContentLoaded', () => {
     pc.onicecandidate = e => {
       if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
-
-    pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
 
     pc.ondatachannel = e => {
       dataChannel = e.channel;
@@ -95,6 +91,12 @@ document.addEventListener('DOMContentLoaded', () => {
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
       updateProgress();
+
+      // send ack every chunk
+      if (dataChannel && dataChannel.readyState === "open") {
+        dataChannel.send("ack");
+      }
+
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
@@ -120,13 +122,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finishCurrentFile() {
     if (!currentFile) return;
-
-    // ✅ Force binary download instead of inline open
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
-    document.body.appendChild(a); // needed for iOS
+    document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 
@@ -139,28 +139,17 @@ document.addEventListener('DOMContentLoaded', () => {
     currentFile = fileQueue.shift() || null;
   }
 
-  roomDisplay.addEventListener('click', () => {
-    if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast('Room ID copied!', 'success'))
-      .catch(() => showToast('Failed to copy', 'error'));
-  });
-
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
-
     socket.emit('receiver-disconnect');
-
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
-
     showToast("Disconnected from room", "info");
-
     dataChannel = null;
     pc = null;
     currentFile = null;
