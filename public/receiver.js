@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalFiles = 0, totalBytes = 0;
 
   const startTimeMap = new Map(); // fileName -> startTime
+  const lastReceivedMap = new Map(); // fileName -> { lastTime, lastBytes }
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -42,7 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
+    const iceServers = await fetch("/ice-servers")
+      .then(res => res.json())
+      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
+
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
@@ -82,9 +86,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!currentFile) return;
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
+
+      const now = performance.now();
+      const last = lastReceivedMap.get(currentFile.meta.filename) || { lastTime: now, lastBytes: 0 };
+      const instantSpeed = ((currentFile.received - last.lastBytes) / 1024 / 1024) / ((now - last.lastTime) / 1000); // MB/s
+      lastReceivedMap.set(currentFile.meta.filename, { lastTime: now, lastBytes: currentFile.received });
+
+      console.log(`Receiving ${currentFile.meta.filename}: ${instantSpeed.toFixed(2)} MB/s`);
       updateProgress();
 
-      // send ack for each chunk
+      // send ack
       if (dataChannel && dataChannel.readyState === "open") dataChannel.send("ack");
 
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
@@ -98,10 +109,12 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
-    if (!currentFile) currentFile = fileObj;
-    else fileQueue.push(fileObj);
+    if (!currentFile) {
+      currentFile = fileObj;
+      startTimeMap.set(meta.filename, performance.now());
+      lastReceivedMap.set(meta.filename, { lastTime: performance.now(), lastBytes: 0 });
+    } else fileQueue.push(fileObj);
 
-    startTimeMap.set(meta.filename, performance.now());
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
@@ -121,18 +134,22 @@ document.addEventListener('DOMContentLoaded', () => {
     a.click();
     document.body.removeChild(a);
 
+    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     const endTime = performance.now();
     const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
-    const speed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
-    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Speed: ${speed} MB/s`);
+    const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
 
-    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
+    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
+
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
 
-    showToast(`File received: ${currentFile.meta.filename}`, "success");
     currentFile = fileQueue.shift() || null;
+    if (currentFile) {
+      startTimeMap.set(currentFile.meta.filename, performance.now());
+      lastReceivedMap.set(currentFile.meta.filename, { lastTime: performance.now(), lastBytes: 0 });
+    }
   }
 
   disconnectBtn.addEventListener('click', () => {
@@ -152,5 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
+    startTimeMap.clear();
+    lastReceivedMap.clear();
   });
 });
