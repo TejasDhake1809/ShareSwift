@@ -131,31 +131,43 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function finishCurrentFile() {
-    if (!currentFile) return;
-    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = currentFile.meta.filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  if (!currentFile) return;
+  const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = currentFile.meta.filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 
-    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
-    const endTime = performance.now();
-    const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
-    const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
-    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
+  currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
+  const endTime = performance.now();
+  const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
+  const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
+  console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
 
-    totalFiles++;
-    totalBytes += currentFile.meta.size;
-    receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+  totalFiles++;
+  totalBytes += currentFile.meta.size;
+  receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
 
-    currentFile = fileQueue.shift() || null;
-    if (currentFile) {
-      startTimeMap.set(currentFile.meta.filename, performance.now());
-      lastReceivedMap.set(currentFile.meta.filename, { lastTime: performance.now(), lastBytes: 0 });
-    }
+  // ✅ Expose status to Puppeteer
+  window.lastReceivedFile = {
+    fileName: currentFile.meta.filename,
+    totalBytes: currentFile.meta.size,
+    totalFiles,
+    totalBytesAll: totalBytes,
+    duration,
+    avgSpeed
+  };
+  window.fileTransferCompleted = true;
+
+  currentFile = fileQueue.shift() || null;
+  if (currentFile) {
+    startTimeMap.set(currentFile.meta.filename, performance.now());
+    lastReceivedMap.set(currentFile.meta.filename, { lastTime: performance.now(), lastBytes: 0 });
   }
+}
+
 
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
