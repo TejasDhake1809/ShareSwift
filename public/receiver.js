@@ -17,8 +17,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
 
-  const startTimeMap = new Map(); // fileName -> startTime
-  const lastReceivedMap = new Map(); // fileName -> { lastTime, lastBytes }
+  const startTimeMap = new Map();
+  const lastReceivedMap = new Map();
+
+  const ACK_EVERY_N_CHUNKS = 16; // batch ack every 16 chunks
+  let ackCounter = 0;
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -43,9 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    const iceServers = await fetch("/ice-servers")
-      .then(res => res.json())
-      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
+    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
 
     pc = new RTCPeerConnection({ iceServers });
 
@@ -92,10 +93,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const instantSpeed = ((currentFile.received - last.lastBytes) / 1024 / 1024) / ((now - last.lastTime) / 1000); // MB/s
       lastReceivedMap.set(currentFile.meta.filename, { lastTime: now, lastBytes: currentFile.received });
 
-      console.log(`Receiving ${currentFile.meta.filename}: ${instantSpeed.toFixed(2)} MB/s`);
-      updateProgress();
+      if (!currentFile.row.lastUpdate || now - currentFile.row.lastUpdate > 100) { // throttle DOM
+        updateProgress();
+        currentFile.row.lastUpdate = now;
+      }
 
-      // **Removed ack sending** for faster throughput
+      ackCounter++;
+      if (ackCounter >= ACK_EVERY_N_CHUNKS && dataChannel.readyState === "open") {
+        dataChannel.send("ack");
+        ackCounter = 0;
+      }
 
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
@@ -137,7 +144,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const endTime = performance.now();
     const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
     const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
-
     console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
 
     totalFiles++;

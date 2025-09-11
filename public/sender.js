@@ -13,13 +13,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
+  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [], ack: true }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
   let isSending = false;
 
-  const startTimeMap = new Map(); // fileName -> startTime
+  const startTimeMap = new Map();
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -35,19 +35,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('init', async ({ receiverSocketId }) => {
-    const iceServers = await fetch("/ice-servers")
-      .then(res => res.json())
-      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
-
+    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
     dataChannel.binaryType = "arraybuffer";
+
     const queue = [];
-    receivers.set(receiverSocketId, { pc, dataChannel, queue });
+    receivers.set(receiverSocketId, { pc, dataChannel, queue, ack: true });
 
     dataChannel.onopen = () => {
       showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
       while (queue.length) dataChannel.send(queue.shift());
+    };
+
+    dataChannel.onmessage = e => {
+      if (e.data === "ack") receivers.get(receiverSocketId).ack = true;
     };
 
     pc.onicecandidate = event => {
@@ -132,17 +134,16 @@ document.addEventListener('DOMContentLoaded', () => {
         else queue.push(header);
       });
 
-      const chunkSize = 256 * 1024; // 256 KB
+      const chunkSize = 512 * 1024; // 512 KB
       let offset = 0;
       const reader = new FileReader();
       startTimeMap.set(file.name, performance.now());
 
       reader.onload = async e => {
         const chunk = e.target.result;
-
         for (const [id, conn] of receivers.entries()) {
           if (conn.dataChannel.readyState === "open") {
-            while (conn.dataChannel.bufferedAmount > 64 * 1024 * 1024) {
+            while (conn.dataChannel.bufferedAmount > 32 * 1024 * 1024 || !conn.ack) {
               await new Promise(r => setTimeout(r, 5));
             }
             conn.dataChannel.send(chunk);
