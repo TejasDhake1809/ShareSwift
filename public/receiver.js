@@ -95,8 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
       console.log(`Receiving ${currentFile.meta.filename}: ${instantSpeed.toFixed(2)} MB/s`);
       updateProgress();
 
-      // send ack
-      if (dataChannel && dataChannel.readyState === "open") dataChannel.send("ack");
+      // **Removed ack sending** for faster throughput
 
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }

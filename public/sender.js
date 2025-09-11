@@ -13,13 +13,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [], ack: true }
+  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
   let isSending = false;
 
-  const startTimeMap = new Map();
+  const startTimeMap = new Map(); // fileName -> startTime
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -42,17 +42,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
     dataChannel.binaryType = "arraybuffer";
-
     const queue = [];
-    receivers.set(receiverSocketId, { pc, dataChannel, queue, ack: true });
+    receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
     dataChannel.onopen = () => {
       showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
       while (queue.length) dataChannel.send(queue.shift());
-    };
-
-    dataChannel.onmessage = e => {
-      if (e.data === "ack") receivers.get(receiverSocketId).ack = true;
     };
 
     pc.onicecandidate = event => {
@@ -137,21 +132,20 @@ document.addEventListener('DOMContentLoaded', () => {
         else queue.push(header);
       });
 
-      const chunkSize = 65536; // 64 KB
+      const chunkSize = 256 * 1024; // 256 KB
       let offset = 0;
       const reader = new FileReader();
       startTimeMap.set(file.name, performance.now());
 
       reader.onload = async e => {
         const chunk = e.target.result;
+
         for (const [id, conn] of receivers.entries()) {
           if (conn.dataChannel.readyState === "open") {
-            // adaptive wait for backpressure
-            while (conn.dataChannel.bufferedAmount > 8 * chunkSize || !conn.ack) {
+            while (conn.dataChannel.bufferedAmount > 64 * 1024 * 1024) {
               await new Promise(r => setTimeout(r, 5));
             }
             conn.dataChannel.send(chunk);
-            conn.ack = false;
           }
         }
 
