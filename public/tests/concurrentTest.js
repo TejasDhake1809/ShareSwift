@@ -1,46 +1,56 @@
 // concurrentTest.js
-const puppeteer = require('puppeteer');
+const puppeteer = require("puppeteer");
 
-const RECEIVER_URL = 'https://shareswift-1.onrender.com/receiver.html';
-const ROOM_ID = '3aaaa6'; // <-- update with your active room ID
-const NUM_RECEIVERS = 3;  // how many concurrent users to simulate
-const HEADLESS = true;    // false if you want to see browsers
+const RECEIVER_URL = "https://shareswift-1.onrender.com/receiver.html";
+const ROOM_ID = '1eb6fb'; // replace with an active room from sender
+const NUM_RECEIVERS = 3; // adjust how many concurrent receivers
+const HEADLESS = true;   // set false to watch browsers
 
 async function simulateReceiver(id) {
-  const browser = await puppeteer.launch({ headless: HEADLESS, args: ['--no-sandbox'] });
+  const browser = await puppeteer.launch({
+    headless: HEADLESS,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
   const page = await browser.newPage();
 
-  let startTime = performance.now();
+  let startTime, endTime;
 
-  // Expose a function for structured logging
-  await page.exposeFunction('receiverComplete', (fileName, bytes, duration, avgSpeed) => {
-    console.log(
-      `Receiver ${id} finished file "${fileName}" (${bytes} bytes) in ${duration.toFixed(2)}s | Avg: ${avgSpeed} MB/s`
-    );
+  // Navigate to receiver page
+  await page.goto(RECEIVER_URL, { waitUntil: "domcontentloaded" });
+
+  // Wait for input and join button to appear
+  await page.waitForSelector("#join-room-input", { visible: true });
+  await page.waitForSelector("#join-room-btn", { visible: true });
+
+  // Fill in room ID and join
+  await page.type("#join-room-input", ROOM_ID);
+  await page.click("#join-room-btn");
+
+  // Wait for the receiver panel (means connected to sender)
+  await page.waitForSelector("#receive-panel", { visible: true, timeout: 60000 });
+
+  startTime = Date.now();
+
+  // Poll until at least one file is received
+  await page.waitForFunction(
+    () => {
+      const metrics = document.querySelector("#received-metrics")?.textContent || "";
+      return metrics.includes("Files received:") && !metrics.includes("0");
+    },
+    { timeout: 300000 } // 5 min max wait
+  );
+
+  endTime = Date.now();
+
+  // Get file info
+  const result = await page.evaluate(() => {
+    const fileName = document.querySelector("#received-files .file-entry .fname")?.textContent || "unknown";
+    const metrics = document.querySelector("#received-metrics")?.textContent || "";
+    return { fileName, metrics };
   });
 
-  await page.goto(RECEIVER_URL, { waitUntil: 'networkidle2' });
-
-  // Fill in room ID and click join
-  await page.type('#join-room-input', ROOM_ID);
-  await page.click('#join-room-btn');
-
-  // Wait until receive panel is visible
-  await page.waitForSelector('#receive-panel', { visible: true });
-
-  // Wait until the page sets fileTransferCompleted
-  await page.waitForFunction(() => window.fileTransferCompleted === true, { timeout: 300000 });
-
-  // Grab last file info from the page
-  const fileInfo = await page.evaluate(() => window.lastReceivedFile);
-
-  // Pass info into exposed logging function
-  await page.evaluate(
-    ({ fileName, totalBytes, duration, avgSpeed }) => {
-      window.receiverComplete(fileName, totalBytes, duration, avgSpeed);
-    },
-    fileInfo
-  );
+  console.log(`✅ Receiver ${id} got ${result.fileName} in ${(endTime - startTime) / 1000}s`);
+  console.log(`   Metrics: ${result.metrics}`);
 
   await browser.close();
 }
@@ -48,16 +58,9 @@ async function simulateReceiver(id) {
 (async () => {
   console.log(`Starting test with ${NUM_RECEIVERS} concurrent receivers...`);
 
-  const startAll = performance.now();
+  const startAll = Date.now();
+  await Promise.all(Array.from({ length: NUM_RECEIVERS }, (_, i) => simulateReceiver(i + 1)));
+  const endAll = Date.now();
 
-  // Kick off all receivers
-  const promises = [];
-  for (let i = 0; i < NUM_RECEIVERS; i++) {
-    promises.push(simulateReceiver(i + 1));
-  }
-
-  await Promise.all(promises);
-
-  const endAll = performance.now();
-  console.log(`✅ All receivers completed in ${(endAll - startAll) / 1000}s`);
+  console.log(`🎉 All receivers finished in ${(endAll - startAll) / 1000}s`);
 })();

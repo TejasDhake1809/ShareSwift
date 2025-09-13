@@ -18,9 +18,10 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalFiles = 0, totalBytes = 0;
 
   const startTimeMap = new Map();
-  const lastReceivedMap = new Map();
+  const receivedChunks = new Map();
 
-  const ACK_EVERY_N_CHUNKS = 16; // batch ack every 16 chunks
+  const ACK_EVERY_N = 16;
+  let highestSeq = -1;
   let ackCounter = 0;
 
   function showToast(msg, type = "info") {
@@ -83,28 +84,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'header') startNextFile(msg.meta);
       else if (msg.type === 'done') finishCurrentFile();
-    } else {
-      if (!currentFile) return;
-      currentFile.buffer.push(e.data);
-      currentFile.received += e.data.byteLength;
-
-      const now = performance.now();
-      const last = lastReceivedMap.get(currentFile.meta.filename) || { lastTime: now, lastBytes: 0 };
-      const instantSpeed = ((currentFile.received - last.lastBytes) / 1024 / 1024) / ((now - last.lastTime) / 1000); // MB/s
-      lastReceivedMap.set(currentFile.meta.filename, { lastTime: now, lastBytes: currentFile.received });
-
-      if (!currentFile.row.lastUpdate || now - currentFile.row.lastUpdate > 100) { // throttle DOM
-        updateProgress();
-        currentFile.row.lastUpdate = now;
+      else if (msg.type === 'chunk') {
+        const { seq, data } = msg;
+        receivedChunks.set(seq, new Uint8Array(data));
+        highestSeq = Math.max(highestSeq, seq);
+        ackCounter++;
+        if (ackCounter >= ACK_EVERY_N && dataChannel.readyState === "open") {
+          dataChannel.send(JSON.stringify({ type: "ack", seq: highestSeq }));
+          ackCounter = 0;
+        }
       }
-
-      ackCounter++;
-      if (ackCounter >= ACK_EVERY_N_CHUNKS && dataChannel.readyState === "open") {
-        dataChannel.send("ack");
-        ackCounter = 0;
-      }
-
-      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
 
@@ -115,59 +104,40 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
-    if (!currentFile) {
-      currentFile = fileObj;
-      startTimeMap.set(meta.filename, performance.now());
-      lastReceivedMap.set(meta.filename, { lastTime: performance.now(), lastBytes: 0 });
-    } else fileQueue.push(fileObj);
+    currentFile = fileObj;
+    startTimeMap.set(meta.filename, performance.now());
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
-  function updateProgress() {
-    if (!currentFile || !currentFile.row) return;
-    currentFile.row.querySelector('.progress-bar-fill').style.width =
-      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
-  }
-
   function finishCurrentFile() {
-  if (!currentFile) return;
-  const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = currentFile.meta.filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+    if (!currentFile) return;
+    const ordered = [];
+    for (let i = 0; i <= highestSeq; i++) {
+      if (receivedChunks.has(i)) ordered.push(receivedChunks.get(i));
+    }
+    const blob = new Blob(ordered, { type: "application/octet-stream" });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = currentFile.meta.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 
-  currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
-  const endTime = performance.now();
-  const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
-  const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
-  console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
+    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
+    const endTime = performance.now();
+    const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
+    const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
+    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
 
-  totalFiles++;
-  totalBytes += currentFile.meta.size;
-  receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+    totalFiles++;
+    totalBytes += currentFile.meta.size;
+    receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
 
-  // ✅ Expose status to Puppeteer
-  window.lastReceivedFile = {
-    fileName: currentFile.meta.filename,
-    totalBytes: currentFile.meta.size,
-    totalFiles,
-    totalBytesAll: totalBytes,
-    duration,
-    avgSpeed
-  };
-  window.fileTransferCompleted = true;
-
-  currentFile = fileQueue.shift() || null;
-  if (currentFile) {
-    startTimeMap.set(currentFile.meta.filename, performance.now());
-    lastReceivedMap.set(currentFile.meta.filename, { lastTime: performance.now(), lastBytes: 0 });
+    receivedChunks.clear();
+    highestSeq = -1;
+    currentFile = null;
   }
-}
-
 
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
@@ -183,10 +153,10 @@ document.addEventListener('DOMContentLoaded', () => {
     dataChannel = null;
     pc = null;
     currentFile = null;
-    fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
     startTimeMap.clear();
-    lastReceivedMap.clear();
+    receivedChunks.clear();
+    highestSeq = -1;
   });
 });
