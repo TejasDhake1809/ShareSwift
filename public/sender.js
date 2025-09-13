@@ -33,31 +33,30 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('init', async ({ receiverSocketId }) => {
-    // ✅ Fetch Twilio ICE servers from backend
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       });
 
     const pc = new RTCPeerConnection({ iceServers });
-
-    const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
+    const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
+
+    // Backpressure threshold (256 KB)
+    dataChannel.bufferedAmountLowThreshold = 256 * 1024;
 
     const queue = [];
     receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
     dataChannel.onopen = () => {
       showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
-      // send queued messages
       while (queue.length) dataChannel.send(queue.shift());
     };
 
     dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
 
-    // DEBUG: ICE / connection state
     pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
     pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
 
@@ -86,10 +85,8 @@ document.addEventListener('DOMContentLoaded', () => {
   socket.on('receiver-disconnect', ({ receiverId }) => {
     const conn = receivers.get(receiverId);
     if (!conn) return;
-
     if (conn.dataChannel) conn.dataChannel.close();
     if (conn.pc) conn.pc.close();
-
     receivers.delete(receiverId);
     showToast(`Receiver ${receiverId} disconnected`, "error");
     peerStatus.textContent = `Connected peers: ${receivers.size}`;
@@ -99,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
     peerStatus.textContent = `Connected peers: ${count}`;
   });
 
-  // FILE SELECTION + SEND
+  // FILE SELECTION
   fileInput.addEventListener('change', () => {
     const selectedFiles = Array.from(fileInput.files);
     filesQueue.push(...selectedFiles);
@@ -150,26 +147,43 @@ document.addEventListener('DOMContentLoaded', () => {
       const reader = new FileReader();
 
       reader.onload = e => {
-        receivers.forEach(({ dataChannel, queue }) => {
-          if (dataChannel.readyState === 'open') dataChannel.send(e.target.result);
-          else queue.push(e.target.result);
-        });
+        const chunk = e.target.result;
 
-        offset += e.target.result.byteLength;
-        row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
-
-        if (offset < file.size) readSlice(offset);
-        else {
+        const sendChunk = () => {
           receivers.forEach(({ dataChannel, queue }) => {
-            const done = JSON.stringify({ type: 'done' });
-            if (dataChannel.readyState === 'open') dataChannel.send(done);
-            else queue.push(done);
+            if (dataChannel.readyState === 'open') {
+              if (dataChannel.bufferedAmount > dataChannel.bufferedAmountLowThreshold) {
+                dataChannel.onbufferedamountlow = () => {
+                  dataChannel.send(chunk);
+                  dataChannel.onbufferedamountlow = null;
+                };
+              } else {
+                dataChannel.send(chunk);
+              }
+            } else {
+              queue.push(chunk);
+            }
           });
-          totalSentFiles++;
-          totalSentBytes += file.size;
-          sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
-          resolve();
-        }
+
+          offset += chunk.byteLength;
+          row.querySelector('.progress-bar-fill').style.width =
+            `${Math.floor((offset / file.size) * 100)}%`;
+
+          if (offset < file.size) readSlice(offset);
+          else {
+            receivers.forEach(({ dataChannel, queue }) => {
+              const done = JSON.stringify({ type: 'done' });
+              if (dataChannel.readyState === 'open') dataChannel.send(done);
+              else queue.push(done);
+            });
+            totalSentFiles++;
+            totalSentBytes += file.size;
+            sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
+            resolve();
+          }
+        };
+
+        sendChunk();
       };
 
       function readSlice(o) {

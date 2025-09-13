@@ -40,12 +40,11 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    // ✅ Fetch Twilio ICE servers dynamically
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       });
 
     pc = new RTCPeerConnection({ iceServers });
@@ -120,13 +119,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finishCurrentFile() {
     if (!currentFile) return;
-
-    // ✅ Force binary download instead of inline open
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
-    document.body.appendChild(a); // needed for iOS
+    document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 
@@ -149,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
-
     socket.emit('receiver-disconnect');
 
     receivePanel.classList.add('hidden');
