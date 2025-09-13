@@ -39,7 +39,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
     dataChannel.bufferedAmountLowThreshold = 256 * 1024;
-
     const queue = [];
     receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
@@ -142,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
       let offset = 0;
       const reader = new FileReader();
 
-      reader.onload = e => {
+      reader.onload = async e => {
         const chunkData = e.target.result;
 
         const sendChunk = () => {
@@ -172,19 +171,27 @@ document.addEventListener('DOMContentLoaded', () => {
           row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
 
           if (offset < file.size) readSlice(offset);
-          else {
-            receivers.forEach(({ dataChannel, queue }) => {
-              const done = JSON.stringify({ type: 'done', fileId });
-              if (dataChannel.readyState === 'open') dataChannel.send(done);
-              else queue.push(done);
-              log(`Done sent/queued`);
+          else sendDoneToAll();
+        };
+
+        const sendDoneToAll = async () => {
+          for (const { dataChannel, queue } of receivers.values()) {
+            const done = JSON.stringify({ type: 'done', fileId });
+            await new Promise(res => {
+              const sendFunc = () => {
+                if (dataChannel.bufferedAmount > dataChannel.bufferedAmountLowThreshold) {
+                  dataChannel.onbufferedamountlow = () => { dataChannel.send(done); res(); dataChannel.onbufferedamountlow = null; };
+                } else { dataChannel.send(done); res(); }
+              };
+              sendFunc();
             });
-            totalSentFiles++;
-            totalSentBytes += file.size;
-            sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
-            log(`Finished sending ${file.name}`);
-            resolve();
+            log(`Done sent for ${file.name}`);
           }
+          totalSentFiles++;
+          totalSentBytes += file.size;
+          sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
+          log(`Finished sending ${file.name}`);
+          resolve();
         };
 
         sendChunk();

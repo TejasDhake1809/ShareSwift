@@ -11,7 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const receivedMetrics = document.getElementById('received-metrics');
   const disconnectBtn = document.getElementById('disconnect-btn');
 
-  let pc = null, dataChannel = null, totalFiles = 0, totalBytes = 0;
+  let pc = null, dataChannel = null;
+  let totalFiles = 0, totalBytes = 0;
   const filesInProgress = new Map();
   const pendingChunks = new Map();
 
@@ -42,12 +43,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     pc = new RTCPeerConnection({ iceServers });
 
-    pc.onicecandidate = e => { if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate }); };
+    pc.onicecandidate = e => {
+      if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
+    };
 
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
-      dataChannel.onopen = () => { receivePanel.classList.remove('hidden'); joinPanel.classList.add('hidden'); log("Data channel open"); };
+      dataChannel.onopen = () => {
+        receivePanel.classList.remove('hidden');
+        joinPanel.classList.add('hidden');
+        log("Data channel open");
+      };
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -69,26 +76,40 @@ document.addEventListener('DOMContentLoaded', () => {
       log(`Received message type: ${msg.type} for fileId: ${msg.fileId || 'N/A'}`);
 
       if (msg.type === 'header') startFile(msg.fileId, msg.meta);
-      else if (msg.type === 'done') finishFile(msg.fileId);
+      else if (msg.type === 'done') {
+        const fileObj = filesInProgress.get(msg.fileId);
+        if (fileObj) {
+          fileObj.doneReceived = true;
+          if (fileObj.received >= fileObj.meta.size) finishFile(msg.fileId);
+          else log(`Done received but waiting for remaining chunks for ${msg.fileId}`);
+        } else log(`Done received for unknown fileId ${msg.fileId}, storing temporarily`);
+      }
     } else {
-      const dataView = new DataView(e.data);
-      const fileIdLength = dataView.getUint8(0);
-      const decoder = new TextDecoder();
-      const fileId = decoder.decode(e.data.slice(1, 1 + fileIdLength));
-      const chunk = e.data.slice(1 + fileIdLength);
+      const { fileId, chunk } = parseChunk(e.data);
+      let fileObj = filesInProgress.get(fileId);
 
-      if (!filesInProgress.has(fileId)) {
+      if (!fileObj) {
         log(`Received chunk for unknown fileId ${fileId}, storing temporarily`);
         if (!pendingChunks.has(fileId)) pendingChunks.set(fileId, []);
         pendingChunks.get(fileId).push(chunk);
         return;
       }
 
-      const fileObj = filesInProgress.get(fileId);
       fileObj.buffer.push(chunk);
       fileObj.received += chunk.byteLength;
       updateProgress(fileObj);
+
+      if (fileObj.doneReceived && fileObj.received >= fileObj.meta.size) finishFile(fileId);
     }
+  }
+
+  function parseChunk(data) {
+    const dataView = new DataView(data);
+    const fileIdLength = dataView.getUint8(0);
+    const decoder = new TextDecoder();
+    const fileId = decoder.decode(data.slice(1, 1 + fileIdLength));
+    const chunk = data.slice(1 + fileIdLength);
+    return { fileId, chunk };
   }
 
   function startFile(fileId, meta) {
@@ -97,15 +118,12 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    const fileObj = { meta, buffer: [], received: 0, row };
+    const fileObj = { meta, buffer: [], received: 0, row, doneReceived: false };
     filesInProgress.set(fileId, fileObj);
     log(`Started file ${meta.filename} (ID: ${fileId})`);
 
     if (pendingChunks.has(fileId)) {
-      pendingChunks.get(fileId).forEach(chunk => {
-        const tempEvent = { data: prependFileId(fileId, chunk) };
-        handleDataMessage(tempEvent);
-      });
+      pendingChunks.get(fileId).forEach(chunk => handleDataMessage({ data: prependFileId(fileId, chunk) }));
       pendingChunks.delete(fileId);
       log(`Processed pending chunks for ${meta.filename}`);
     }
