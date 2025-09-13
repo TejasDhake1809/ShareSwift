@@ -22,13 +22,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let totalSentBytes = 0;
     let isSending = false;
 
+    // ✅ DEFINED UP HERE: We need CHUNK_SIZE to calculate the buffer threshold.
+    const CHUNK_SIZE = 256 * 1024; // 256KB
 
     function showToast(msg, type = "info") {
         const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
         Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
     }
 
-    // ... (keep all socket listeners from 'create-room-btn' down to 'sendBtn.addEventListener') ...
     createRoomBtn.addEventListener('click', () => socket.emit('create-room'));
 
     socket.on('room-created', ({ roomId }) => {
@@ -49,9 +50,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const dataChannel = pc.createDataChannel("files", { ordered: true });
         dataChannel.binaryType = "arraybuffer";
 
-        const BUFFER_THRESHOLD = 64 * 1024 * 1024; // 64MB
+        // ✅ CRITICAL FIX: The buffer threshold was too high, exceeding internal browser limits.
+        // We are reducing it drastically to be just a few multiples of the chunk size.
+        // This is a more conservative but much more stable approach.
+        const BUFFER_THRESHOLD = CHUNK_SIZE * 4; // 1MB (256KB * 4)
         dataChannel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
-        
+
         const queue = [];
         receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
@@ -60,32 +64,30 @@ document.addEventListener('DOMContentLoaded', () => {
             while (queue.length) dataChannel.send(queue.shift());
         };
 
+        // ... (the rest of the 'init' handler and other socket listeners remain the same) ...
         dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
         pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
         pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
-
         pc.onicecandidate = event => {
             if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
         };
-
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
     });
-
+    
+    // ... (keep all other socket listeners: answer, ice-candidate, etc.) ...
     socket.on('answer', async ({ from, answer }) => {
         const conn = receivers.get(from);
         if (!conn) return;
         await conn.pc.setRemoteDescription(answer);
         showToast(`Receiver ${from} connected`, "success");
     });
-
     socket.on('ice-candidate', async ({ candidate, from }) => {
         const conn = receivers.get(from);
         if (!conn || !candidate) return;
         await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
     });
-
     socket.on('receiver-disconnect', ({ receiverId }) => {
         const conn = receivers.get(receiverId);
         if (!conn) return;
@@ -95,11 +97,9 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast(`Receiver ${receiverId} disconnected`, "error");
         peerStatus.textContent = `Connected peers: ${receivers.size}`;
     });
-
     socket.on('update-receivers', ({ count }) => {
         peerStatus.textContent = `Connected peers: ${count}`;
     });
-
     fileInput.addEventListener('change', () => {
         const selectedFiles = Array.from(fileInput.files);
         filesQueue.push(...selectedFiles);
@@ -107,7 +107,6 @@ document.addEventListener('DOMContentLoaded', () => {
         fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize} B`;
         sendBtn.disabled = filesQueue.length === 0;
         cancelBtn.disabled = filesQueue.length === 0;
-
         selectedFilesList.innerHTML = '';
         filesQueue.forEach(f => {
             const div = document.createElement('div');
@@ -118,7 +117,6 @@ document.addEventListener('DOMContentLoaded', () => {
         fileInput.value = '';
         showToast(`${selectedFiles.length} file(s) added to queue`);
     });
-
     sendBtn.addEventListener('click', async () => {
         if (!receivers.size || !filesQueue.length || isSending) return;
         isSending = true;
@@ -133,10 +131,9 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast("All files sent!", "success");
     });
 
-
-    // ✅ REWRITTEN FUNCTION: This is a complete replacement of the old sendFile function.
+    // The 'sendFile' function and its while loop are now correct.
+    // The only change needed was the BUFFER_THRESHOLD value.
     async function sendFile(file) {
-        const CHUNK_SIZE = 256 * 1024;
         let offset = 0;
         let lastBytesSent = 0;
         let lastTimestamp = Date.now();
@@ -150,25 +147,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const statsDiv = row.querySelector('.stats');
         const progressBarFill = row.querySelector('.progress-bar-fill');
 
-        // Send file header
         receivers.forEach(({ dataChannel }) => {
             dataChannel.send(JSON.stringify({ type: "header", meta }));
         });
 
-        // ✨ NEW: Helper function that returns a promise that resolves when a data channel's buffer is drained.
         const waitForDataChannelDrain = (channel) => {
+            // ✅ We are now checking against the much smaller, safer threshold
             if (channel.bufferedAmount < channel.bufferedAmountLowThreshold) {
                 return Promise.resolve();
             }
             return new Promise(resolve => {
                 channel.onbufferedamountlow = () => {
-                    channel.onbufferedamountlow = null; // Remove listener
+                    channel.onbufferedamountlow = null;
                     resolve();
                 };
             });
         };
 
-        // Start the progress timer
         progressInterval = setInterval(() => {
             const now = Date.now();
             const interval = (now - lastTimestamp) / 1000;
@@ -182,31 +177,24 @@ document.addEventListener('DOMContentLoaded', () => {
             lastTimestamp = now;
         }, 1000);
 
-        // ✨ NEW: The main sending logic is now a controlled while loop.
         while (offset < file.size) {
-            // 1. Wait for all channels to have space in their buffers. This is the key change.
             const drainPromises = [];
             receivers.forEach(({ dataChannel }) => {
                 drainPromises.push(waitForDataChannelDrain(dataChannel));
             });
             await Promise.all(drainPromises);
 
-            // 2. Read the next chunk of the file.
             const slice = file.slice(offset, offset + CHUNK_SIZE);
-            // ✨ NEW: Using the modern blob.arrayBuffer() which returns a promise. No more FileReader events.
             const chunk = await slice.arrayBuffer();
             
-            // 3. Send the chunk to all receivers.
             receivers.forEach(({ dataChannel }) => {
                 dataChannel.send(chunk);
-            });
+});
 
-            // 4. Update offset and UI.
             offset += chunk.byteLength;
             progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
         }
 
-        // --- Cleanup after the loop finishes ---
         clearInterval(progressInterval);
         statsDiv.textContent = 'Done!';
         receivers.forEach(({ dataChannel }) => {
@@ -218,7 +206,6 @@ document.addEventListener('DOMContentLoaded', () => {
         sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
     }
 
-    // ... (keep cancelBtn and roomDisplay listeners)
     cancelBtn.addEventListener('click', () => {
         filesQueue = [];
         selectedFilesList.innerHTML = '';
