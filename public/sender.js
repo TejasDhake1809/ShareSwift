@@ -19,9 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalSentBytes = 0;
   let isSending = false;
 
-  // Constants for file transfer
-  const CHUNK_SIZE = 64 * 1024; // 64 KB chunk size
-  const HIGH_WATER_MARK = 16 * 1024 * 1024; // Pause sending if buffer is > 16MB
+  const CHUNK_SIZE = 64 * 1024; // 64 KB
+  const HIGH_WATER_MARK = 16 * 1024 * 1024; // 16 MB
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -47,7 +46,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
-    
     dataChannel.bufferedAmountLowThreshold = CHUNK_SIZE * 4;
 
     const queue = [];
@@ -57,10 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
       while (queue.length) dataChannel.send(queue.shift());
     };
-
-    dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
-    pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
 
     pc.onicecandidate = event => {
       if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
@@ -87,10 +81,8 @@ document.addEventListener('DOMContentLoaded', () => {
   socket.on('receiver-disconnect', ({ receiverId }) => {
     const conn = receivers.get(receiverId);
     if (!conn) return;
-
     if (conn.dataChannel) conn.dataChannel.close();
     if (conn.pc) conn.pc.close();
-
     receivers.delete(receiverId);
     showToast(`Receiver ${receiverId} disconnected`, "error");
     peerStatus.textContent = `Connected peers: ${receivers.size}`;
@@ -107,7 +99,6 @@ document.addEventListener('DOMContentLoaded', () => {
     fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize.toLocaleString()} B`;
     sendBtn.disabled = filesQueue.length === 0;
     cancelBtn.disabled = filesQueue.length === 0;
-
     selectedFilesList.innerHTML = '';
     filesQueue.forEach(f => {
       const div = document.createElement('div');
@@ -137,7 +128,6 @@ document.addEventListener('DOMContentLoaded', () => {
     row.className = 'file-entry';
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     filesList.appendChild(row);
-
     const progressBarFill = row.querySelector('.progress-bar-fill');
 
     const header = JSON.stringify({ type: "header", meta });
@@ -148,26 +138,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let offset = 0;
     while (offset < file.size) {
-      for (const { dataChannel } of receivers.values()) {
-        if (dataChannel.bufferedAmount > HIGH_WATER_MARK) {
-          await new Promise(resolve => {
-            // ❗ FIX: Use addEventListener with { once: true } for reliability.
-            // This prevents a race condition where the event fires before the
-            // `onbufferedamountlow` handler is assigned.
-            dataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
-          });
-        }
-      }
-
+      // ❗ KEY CHANGE 1: Read the chunk *before* iterating through receivers.
       const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
       const chunkBuffer = await chunkSlice.arrayBuffer();
 
-      receivers.forEach(({ dataChannel }) => {
+      // ❗ KEY CHANGE 2: Iterate and handle each receiver individually.
+      for (const { dataChannel } of receivers.values()) {
+        // Wait for this specific receiver's buffer to clear before sending.
+        if (dataChannel.bufferedAmount > HIGH_WATER_MARK) {
+          await new Promise(resolve => {
+            dataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
+          });
+        }
+        // Now it's safe to send to this receiver.
         if (dataChannel.readyState === 'open') {
           dataChannel.send(chunkBuffer);
         }
-      });
+      }
 
+      // ❗ KEY CHANGE 3: Update offset and progress after the chunk is handled for ALL receivers.
       offset += chunkBuffer.byteLength;
       progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
     }
@@ -182,7 +171,6 @@ document.addEventListener('DOMContentLoaded', () => {
     totalSentBytes += file.size;
     sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes.toLocaleString()}`;
   }
-
 
   cancelBtn.addEventListener('click', () => {
     filesQueue = [];
