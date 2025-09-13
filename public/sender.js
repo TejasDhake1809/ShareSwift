@@ -48,7 +48,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
     
-    // Set the buffer threshold. When it drops below this, 'bufferedamountlow' fires.
     dataChannel.bufferedAmountLowThreshold = CHUNK_SIZE * 4;
 
     const queue = [];
@@ -132,11 +131,6 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast("All files sent!", "success");
   });
 
-  /**
-   * =================================================================
-   * ✅ REPLACED FUNCTION TO HANDLE LARGE FILES WITH BACKPRESSURE
-   * =================================================================
-   */
   async function sendFile(file) {
     const meta = { filename: file.name, size: file.size, type: file.type };
     const row = document.createElement('div');
@@ -146,7 +140,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const progressBarFill = row.querySelector('.progress-bar-fill');
 
-    // 1. Send file header to all peers
     const header = JSON.stringify({ type: "header", meta });
     receivers.forEach(({ dataChannel, queue }) => {
       if (dataChannel.readyState === 'open') dataChannel.send(header);
@@ -154,14 +147,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     let offset = 0;
-    // 2. Read and send file in chunks using a while loop
     while (offset < file.size) {
-      // Wait for the slowest peer's buffer to drain before sending more data
       for (const { dataChannel } of receivers.values()) {
         if (dataChannel.bufferedAmount > HIGH_WATER_MARK) {
           await new Promise(resolve => {
-            // The 'bufferedamountlow' event fires when the buffer drops below the threshold
-            dataChannel.onbufferedamountlow = resolve;
+            // ❗ FIX: Use addEventListener with { once: true } for reliability.
+            // This prevents a race condition where the event fires before the
+            // `onbufferedamountlow` handler is assigned.
+            dataChannel.addEventListener('bufferedamountlow', resolve, { once: true });
           });
         }
       }
@@ -169,9 +162,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
       const chunkBuffer = await chunkSlice.arrayBuffer();
 
-      // Send the binary chunk to all peers
       receivers.forEach(({ dataChannel }) => {
-        // We don't queue binary chunks to avoid high memory usage
         if (dataChannel.readyState === 'open') {
           dataChannel.send(chunkBuffer);
         }
@@ -181,7 +172,6 @@ document.addEventListener('DOMContentLoaded', () => {
       progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
     }
 
-    // 3. Send 'done' message to all peers
     const doneMsg = JSON.stringify({ type: 'done' });
     receivers.forEach(({ dataChannel, queue }) => {
       if (dataChannel.readyState === 'open') dataChannel.send(doneMsg);
