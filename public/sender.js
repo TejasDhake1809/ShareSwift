@@ -35,17 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
   socket.on('init', async ({ receiverSocketId }) => {
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
-      .catch(err => {
-        console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
-      });
+      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
 
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
-
-    // Backpressure threshold (256 KB)
-    dataChannel.bufferedAmountLowThreshold = 256 * 1024;
+    dataChannel.bufferedAmountLowThreshold = 256 * 1024; // 256KB
 
     const queue = [];
     receivers.set(receiverSocketId, { pc, dataChannel, queue });
@@ -56,9 +51,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
-
-    pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
 
     pc.onicecandidate = event => {
       if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
@@ -96,7 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
     peerStatus.textContent = `Connected peers: ${count}`;
   });
 
-  // FILE SELECTION
+  // ------------------- FILE SELECTION -------------------
   fileInput.addEventListener('change', () => {
     const selectedFiles = Array.from(fileInput.files);
     filesQueue.push(...selectedFiles);
@@ -166,8 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
           });
 
           offset += chunk.byteLength;
-          row.querySelector('.progress-bar-fill').style.width =
-            `${Math.floor((offset / file.size) * 100)}%`;
+          row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
 
           if (offset < file.size) readSlice(offset);
           else {

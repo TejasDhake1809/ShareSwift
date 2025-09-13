@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let dataChannel = null;
   let fileQueue = [];
   let currentFile = null;
+  let pendingChunks = []; // NEW: store chunks arriving before header
   let totalFiles = 0, totalBytes = 0;
 
   function showToast(msg, type = "info") {
@@ -53,13 +54,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
-
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", "success");
       };
-
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -71,64 +70,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
-    try {
-      await pc.addIceCandidate(candidate);
-    } catch (err) {
-      console.warn(err);
-    }
+    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
   });
 
   // ------------------- DATA HANDLING -------------------
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-
-      if (msg.type === 'header') {
-        startNextFile(msg.meta);
-      } else if (msg.type === 'done') {
-        finishCurrentFile();
-      }
-
+      if (msg.type === 'header') startNextFile(msg.meta);
+      else if (msg.type === 'done') finishCurrentFile();
     } else {
       if (!currentFile) {
-        console.warn("Got data but no current file!");
+        pendingChunks.push(e.data); // queue until header arrives
         return;
       }
-
-      let chunk;
-
-      // Normalize binary data
-      if (e.data instanceof ArrayBuffer) {
-        chunk = new Uint8Array(e.data);
-      } else if (e.data instanceof Blob) {
-        // Convert Blob → ArrayBuffer → Uint8Array
-        const reader = new FileReader();
-        reader.onload = () => {
-          const arr = new Uint8Array(reader.result);
-          currentFile.buffer.push(arr);
-          currentFile.received += arr.length;
-          console.log(`Received blob chunk: ${arr.length} bytes`);
-          updateProgress();
-          if (currentFile.received >= currentFile.meta.size) {
-            finishCurrentFile();
-          }
-        };
-        reader.readAsArrayBuffer(e.data);
-        return;
-      } else {
-        console.warn("Unknown data type:", e.data);
-        return;
-      }
-
-      currentFile.buffer.push(chunk);
-      currentFile.received += chunk.length;
-      console.log(`Received chunk: ${chunk.length} bytes (total ${currentFile.received}/${currentFile.meta.size})`);
-
+      currentFile.buffer.push(e.data);
+      currentFile.received += e.data.byteLength;
       updateProgress();
-
-      if (currentFile.received >= currentFile.meta.size) {
-        finishCurrentFile();
-      }
+      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
 
@@ -142,6 +101,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!currentFile) {
       currentFile = fileObj;
+      // flush pending chunks
+      pendingChunks.forEach(chunk => {
+        currentFile.buffer.push(chunk);
+        currentFile.received += chunk.byteLength;
+      });
+      pendingChunks = [];
+      updateProgress();
     } else {
       fileQueue.push(fileObj);
     }
@@ -157,37 +123,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finishCurrentFile() {
     if (!currentFile) return;
-
-    // Merge Uint8Arrays into one Blob
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-
     const a = document.createElement('a');
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
     document.body.appendChild(a);
     a.click();
-    a.remove();
-
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
 
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
-
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
     currentFile = fileQueue.shift() || null;
+    // flush pending chunks for the next file
+    if (currentFile && pendingChunks.length) {
+      pendingChunks.forEach(chunk => {
+        currentFile.buffer.push(chunk);
+        currentFile.received += chunk.byteLength;
+      });
+      pendingChunks = [];
+      updateProgress();
+    }
   }
 
   // ------------------- UI -------------------
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast('Room ID copied!', 'success'))
-      .catch(() => showToast('Failed to copy', 'error'));
+    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast('Room ID copied!', 'success'));
   });
 
   disconnectBtn.addEventListener('click', () => {
@@ -208,6 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pc = null;
     currentFile = null;
     fileQueue = [];
+    pendingChunks = [];
     totalFiles = 0;
     totalBytes = 0;
   });
