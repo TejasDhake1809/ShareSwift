@@ -90,15 +90,39 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
     } else {
-      // binary chunk
       if (!currentFile) {
         console.warn("Got data but no current file!");
         return;
       }
 
-      // push raw chunk
-      currentFile.buffer.push(e.data);
-      currentFile.received += e.data.byteLength;
+      let chunk;
+
+      // Normalize binary data
+      if (e.data instanceof ArrayBuffer) {
+        chunk = new Uint8Array(e.data);
+      } else if (e.data instanceof Blob) {
+        // Convert Blob → ArrayBuffer → Uint8Array
+        const reader = new FileReader();
+        reader.onload = () => {
+          const arr = new Uint8Array(reader.result);
+          currentFile.buffer.push(arr);
+          currentFile.received += arr.length;
+          console.log(`Received blob chunk: ${arr.length} bytes`);
+          updateProgress();
+          if (currentFile.received >= currentFile.meta.size) {
+            finishCurrentFile();
+          }
+        };
+        reader.readAsArrayBuffer(e.data);
+        return;
+      } else {
+        console.warn("Unknown data type:", e.data);
+        return;
+      }
+
+      currentFile.buffer.push(chunk);
+      currentFile.received += chunk.length;
+      console.log(`Received chunk: ${chunk.length} bytes (total ${currentFile.received}/${currentFile.meta.size})`);
 
       updateProgress();
 
@@ -116,7 +140,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const fileObj = { meta, buffer: [], received: 0, row };
 
-    // if no file is being processed → set it immediately
     if (!currentFile) {
       currentFile = fileObj;
     } else {
@@ -135,13 +158,18 @@ document.addEventListener('DOMContentLoaded', () => {
   function finishCurrentFile() {
     if (!currentFile) return;
 
+    // Merge Uint8Arrays into one Blob
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = currentFile.meta.filename;
     document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
+    a.remove();
+
+    URL.revokeObjectURL(url);
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
 
@@ -151,7 +179,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    // move to next file if queued
     currentFile = fileQueue.shift() || null;
   }
 
