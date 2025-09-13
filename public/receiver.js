@@ -87,14 +87,27 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'header') startNextFile(msg.meta);
-      else if (msg.type === 'done') finishCurrentFile();
+
+      if (msg.type === 'header') {
+        startNextFile(msg.meta);
+      } else if (msg.type === 'done') {
+        // Only finalize if we already got all bytes
+        if (currentFile && currentFile.received >= currentFile.meta.size) {
+          finishCurrentFile();
+        }
+      }
     } else {
+      // Binary chunk
       if (!currentFile) return;
+
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
       updateProgress();
-      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
+
+      // If we already received everything, finalize immediately
+      if (currentFile.received >= currentFile.meta.size) {
+        finishCurrentFile();
+      }
     }
   }
 
@@ -105,20 +118,24 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
-    if (!currentFile) currentFile = fileObj;
-    else fileQueue.push(fileObj);
+    if (!currentFile) {
+      currentFile = fileObj;
+    } else {
+      fileQueue.push(fileObj);
+    }
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    currentFile.row.querySelector('.progress-bar-fill').style.width =
-      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
+    const percent = Math.floor((currentFile.received / currentFile.meta.size) * 100);
+    currentFile.row.querySelector('.progress-bar-fill').style.width = `${percent}%`;
   }
 
   function finishCurrentFile() {
     if (!currentFile) return;
+
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -133,6 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
+    // Move to next file if queued
     currentFile = fileQueue.shift() || null;
   }
 
