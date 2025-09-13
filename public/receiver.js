@@ -13,10 +13,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let pc = null;
   let dataChannel = null;
-  let fileQueue = [];
-  let currentFile = null;
-  let pendingChunks = [];
   let totalFiles = 0, totalBytes = 0;
+
+  // Maps fileId -> file object {meta, buffer, received, row}
+  const filesInProgress = new Map();
 
   function log(msg) {
     console.log(`[Receiver] ${msg}`);
@@ -45,10 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    const iceServers = await fetch("/ice-servers")
-      .then(res => res.json())
-      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
-
+    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
@@ -77,111 +74,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
-    try {
-      await pc.addIceCandidate(candidate);
-    } catch (err) {
-      console.warn(err);
-    }
+    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
   });
 
-  // ------------------- DATA HANDLING -------------------
+  // ---------------- DATA HANDLING ----------------
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
       log(`Received message type: ${msg.type}`);
 
       if (msg.type === 'header') {
-        startNextFile(msg.meta);
+        startFile(msg.fileId, msg.meta);
       } else if (msg.type === 'done') {
-        if (pendingChunks.length && currentFile) {
-          log(`Flushing ${pendingChunks.length} pending chunks before finishing file`);
-          pendingChunks.forEach(chunk => {
-            currentFile.buffer.push(chunk);
-            currentFile.received += chunk.byteLength;
-          });
-          pendingChunks = [];
-          updateProgress();
-        }
-        finishCurrentFile();
+        finishFile(msg.fileId);
       }
-
     } else {
-      log(`Received chunk: ${e.data.byteLength} bytes`);
-      if (!currentFile) {
-        log("No current file, storing in pendingChunks");
-        pendingChunks.push(e.data);
+      const dataView = new DataView(e.data);
+      const fileIdLength = dataView.getUint8(0);
+      const decoder = new TextDecoder();
+      const fileId = decoder.decode(e.data.slice(1, 1 + fileIdLength));
+      const chunk = e.data.slice(1 + fileIdLength);
+
+      if (!filesInProgress.has(fileId)) {
+        log(`Received chunk for unknown fileId ${fileId}, storing temporarily`);
+        // optional: store in temp buffer
         return;
       }
 
-      currentFile.buffer.push(e.data);
-      currentFile.received += e.data.byteLength;
-      updateProgress();
+      const fileObj = filesInProgress.get(fileId);
+      fileObj.buffer.push(chunk);
+      fileObj.received += chunk.byteLength;
+      updateProgress(fileObj);
     }
   }
 
-  function startNextFile(meta) {
+  function startFile(fileId, meta) {
     const row = document.createElement('div');
     row.className = 'file-entry';
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
-
-    // if no file is being processed → set it immediately
-    if (!currentFile) {
-      currentFile = fileObj;
-      log(`Started receiving file: ${meta.filename}`);
-      // flush any pending chunks if they exist
-      if (pendingChunks.length) {
-        log(`Flushing ${pendingChunks.length} pending chunks to new file`);
-        pendingChunks.forEach(chunk => {
-          currentFile.buffer.push(chunk);
-          currentFile.received += chunk.byteLength;
-        });
-        pendingChunks = [];
-        updateProgress();
-      }
-    } else {
-      fileQueue.push(fileObj);
-    }
+    filesInProgress.set(fileId, fileObj);
+    log(`Started file ${meta.filename} (ID: ${fileId})`);
   }
 
-  function updateProgress() {
-    if (!currentFile || !currentFile.row) return;
-    const percent = Math.min(100, (currentFile.received / currentFile.meta.size) * 100);
-    currentFile.row.querySelector('.progress-bar-fill').style.width = `${percent}%`;
-    log(`Progress: ${percent.toFixed(2)}% for ${currentFile.meta.filename}`);
+  function updateProgress(fileObj) {
+    const percent = Math.min(100, (fileObj.received / fileObj.meta.size) * 100);
+    fileObj.row.querySelector('.progress-bar-fill').style.width = `${percent.toFixed(2)}%`;
+    log(`Progress: ${percent.toFixed(2)}% for ${fileObj.meta.filename}`);
   }
 
-  function finishCurrentFile() {
-    if (!currentFile) return;
+  function finishFile(fileId) {
+    if (!filesInProgress.has(fileId)) return;
+    const fileObj = filesInProgress.get(fileId);
 
-    log(`Finishing file: ${currentFile.meta.filename}`);
-    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
+    const blob = new Blob(fileObj.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = currentFile.meta.filename;
+    a.download = fileObj.meta.filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 
-    currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
+    fileObj.row.querySelector('.progress-bar-fill').style.width = '100%';
 
     totalFiles++;
-    totalBytes += currentFile.meta.size;
+    totalBytes += fileObj.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
 
-    showToast(`File received: ${currentFile.meta.filename}`, 'success');
+    showToast(`File received: ${fileObj.meta.filename}`, 'success');
+    log(`Finished file ${fileObj.meta.filename} (ID: ${fileId})`);
 
-    currentFile = fileQueue.shift() || null;
+    filesInProgress.delete(fileId);
   }
 
-  // ------------------- UI -------------------
+  // ---------------- UI ----------------
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast('Room ID copied!', 'success'))
-      .catch(() => showToast('Failed to copy', 'error'));
+    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast('Room ID copied!', 'success'));
   });
 
   disconnectBtn.addEventListener('click', () => {
@@ -196,13 +167,10 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
 
-    showToast("Disconnected from room", "info");
-
+    log("Disconnected");
     dataChannel = null;
     pc = null;
-    currentFile = null;
-    pendingChunks = [];
-    fileQueue = [];
+    filesInProgress.clear();
     totalFiles = 0;
     totalBytes = 0;
   });
