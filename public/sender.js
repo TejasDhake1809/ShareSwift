@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
+  const receivers = new Map();
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
@@ -129,7 +129,6 @@ document.addEventListener('DOMContentLoaded', () => {
       row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
       filesList.appendChild(row);
 
-      // Send header first
       receivers.forEach(({ dataChannel, queue }) => {
         const header = JSON.stringify({ type: "header", fileId, meta });
         if (dataChannel.readyState === 'open') dataChannel.send(header);

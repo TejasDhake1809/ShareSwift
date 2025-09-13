@@ -82,7 +82,11 @@ document.addEventListener('DOMContentLoaded', () => {
           fileObj.doneReceived = true;
           if (fileObj.received >= fileObj.meta.size) finishFile(msg.fileId);
           else log(`Done received but waiting for remaining chunks for ${msg.fileId}`);
-        } else log(`Done received for unknown fileId ${msg.fileId}, storing temporarily`);
+        } else {
+          log(`Done received for unknown fileId ${msg.fileId}, storing temporarily`);
+          if (!pendingChunks.has(msg.fileId)) pendingChunks.set(msg.fileId, []);
+          pendingChunks.get(msg.fileId).push({ done: true });
+        }
       }
     } else {
       const { fileId, chunk } = parseChunk(e.data);
@@ -123,7 +127,12 @@ document.addEventListener('DOMContentLoaded', () => {
     log(`Started file ${meta.filename} (ID: ${fileId})`);
 
     if (pendingChunks.has(fileId)) {
-      pendingChunks.get(fileId).forEach(chunk => handleDataMessage({ data: prependFileId(fileId, chunk) }));
+      pendingChunks.get(fileId).forEach(chunk => {
+        if (chunk.done) {
+          fileObj.doneReceived = true;
+          if (fileObj.received >= fileObj.meta.size) finishFile(fileId);
+        } else handleDataMessage({ data: prependFileId(fileId, chunk) });
+      });
       pendingChunks.delete(fileId);
       log(`Processed pending chunks for ${meta.filename}`);
     }
