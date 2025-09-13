@@ -5,7 +5,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const sharePanel = document.getElementById('share-panel');
   const roomDisplay = document.getElementById('room-display-persistent');
   const peerStatus = document.getElementById('peer-status');
-  // ... (rest of the element selectors are the same)
   const fileMetrics = document.getElementById('file-metrics');
   const sentMetrics = document.getElementById('sent-metrics');
   const fileInput = document.getElementById('file-input');
@@ -21,10 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let isSending = false;
 
   const CHUNK_SIZE = 64 * 1024; // 64 KB
-  // NEW: Define batch size for ACK-based flow control
-  const ACK_BATCH_SIZE = 16;
+  const ACK_BATCH_SIZE = 16; // Send 16 chunks, then wait for ACK
 
-  // NEW: Map to hold the 'resolve' functions for pending ACK promises
+  // Map to hold the 'resolve' functions for pending ACK promises
   const ackResolvers = new Map();
 
   function showToast(msg, type = "info") {
@@ -32,7 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
   
-  // NEW: Central handler for incoming ACK messages
+  // Central handler for incoming ACK messages
   function handleAck(receiverSocketId) {
     if (ackResolvers.has(receiverSocketId)) {
       const resolve = ackResolvers.get(receiverSocketId);
@@ -50,7 +48,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('init', async ({ receiverSocketId }) => {
-    // ... (ice server fetching is the same)
     const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
 
     const pc = new RTCPeerConnection({ iceServers });
@@ -65,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
       while (queue.length) dataChannel.send(queue.shift());
     };
     
-    // MODIFIED: Set the onmessage handler to route ACKs
+    // Set the onmessage handler to route ACKs
     dataChannel.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'ack') {
@@ -82,18 +79,19 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
   });
 
-  // ... (socket.on 'answer', 'ice-candidate', etc. are the same)
   socket.on('answer', async ({ from, answer }) => {
     const conn = receivers.get(from);
     if (!conn) return;
     await conn.pc.setRemoteDescription(answer);
     showToast(`Receiver ${from} connected`, "success");
   });
+
   socket.on('ice-candidate', async ({ candidate, from }) => {
     const conn = receivers.get(from);
     if (!conn || !candidate) return;
     await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
   });
+
   socket.on('receiver-disconnect', ({ receiverId }) => {
     const conn = receivers.get(receiverId);
     if (!conn) return;
@@ -103,22 +101,48 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(`Receiver ${receiverId} disconnected`, "error");
     peerStatus.textContent = `Connected peers: ${receivers.size}`;
   });
+
   socket.on('update-receivers', ({ count }) => {
     peerStatus.textContent = `Connected peers: ${count}`;
   });
 
-  // ... (file input handling is the same)
-  fileInput.addEventListener('change', () => { /* ... same as before ... */ });
-  sendBtn.addEventListener('click', async () => { /* ... same as before ... */ });
+  // ✅ FIX: Restored the full code for the file input event listener
+  fileInput.addEventListener('change', () => {
+    const selectedFiles = Array.from(fileInput.files);
+    filesQueue.push(...selectedFiles);
+    const totalSize = filesQueue.reduce((acc, f) => acc + f.size, 0);
+    fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize.toLocaleString()} B`;
+    sendBtn.disabled = filesQueue.length === 0;
+    cancelBtn.disabled = filesQueue.length === 0;
 
-  /**
-   * =================================================================
-   * ✅ REWRITTEN sendFile FUNCTION USING ACK-BASED FLOW CONTROL
-   * =================================================================
-   */
+    selectedFilesList.innerHTML = '';
+    filesQueue.forEach(f => {
+      const div = document.createElement('div');
+      div.className = 'selected-file';
+      div.textContent = f.name;
+      selectedFilesList.appendChild(div);
+    });
+    fileInput.value = ''; // Clear the input to allow selecting the same file again
+    showToast(`${selectedFiles.length} file(s) added to queue`);
+  });
+
+  // ✅ FIX: Restored the full code for the send button event listener
+  sendBtn.addEventListener('click', async () => {
+    if (!receivers.size || !filesQueue.length || isSending) return;
+    isSending = true;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    while (filesQueue.length) {
+      await sendFile(filesQueue.shift());
+    }
+    isSending = false;
+    selectedFilesList.innerHTML = '';
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    showToast("All files sent!", "success");
+  });
+
   async function sendFile(file) {
     const meta = { filename: file.name, size: file.size, type: file.type };
-    // ... (UI setup is the same)
     const row = document.createElement('div');
     row.className = 'file-entry';
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
@@ -155,23 +179,36 @@ document.addEventListener('DOMContentLoaded', () => {
           ackPromises.push(promise);
         }
       }
-      await Promise.all(ackPromises);
+      if (ackPromises.length > 0) {
+        await Promise.all(ackPromises);
+      }
       
       progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
     }
 
-    // ... (send 'done' message and update metrics, same as before)
     const doneMsg = JSON.stringify({ type: 'done' });
     receivers.forEach(({ dataChannel, queue }) => {
       if (dataChannel.readyState === 'open') dataChannel.send(doneMsg);
       else queue.push(doneMsg);
     });
+    
     totalSentFiles++;
     totalSentBytes += file.size;
     sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes.toLocaleString()}`;
   }
 
-  // ... (cancel button and room display click listeners are the same)
-  cancelBtn.addEventListener('click', () => { /* ... same as before ... */ });
-  roomDisplay.addEventListener('click', () => { /* ... same as before ... */ });
+  // ✅ FIX: Restored the full code for the cancel button and room display listeners
+  cancelBtn.addEventListener('click', () => {
+    filesQueue = [];
+    selectedFilesList.innerHTML = '';
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    showToast("File selection canceled", "error");
+  });
+
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast("Room ID copied!", "success"));
+  });
 });
