@@ -20,7 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let isSending = false;
 
   const CHUNK_SIZE = 64 * 1024; // 64 KB
-  const ACK_BATCH_SIZE = 16; // Send 16 chunks, then wait for ACK
+  const ACK_BATCH_SIZE = 256; // Send 16 chunks, then wait for ACK
 
   // Map to hold the 'resolve' functions for pending ACK promises
   const ackResolvers = new Map();

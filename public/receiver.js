@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalFiles = 0, totalBytes = 0;
   
   // NEW: Define how often to send an ACK (in number of chunks)
-  const ACK_BATCH_SIZE = 16;
+  const ACK_BATCH_SIZE = 256;
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
