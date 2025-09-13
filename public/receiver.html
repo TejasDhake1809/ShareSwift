@@ -28,6 +28,7 @@
         <span class="label">Room:</span>
         <span id="room-display" class="mono room-id" title="Click to copy"></span>
         <button id="disconnect-btn">Disconnect</button>
+        <div class="metrics" id="download-speed-metrics">Speed: 0 Mbps</div>
       </div>
 
       <div class="metrics">
@@ -40,7 +41,7 @@
       <div id="received-files"></div>
     </div>
   </main>
-  
+
   <script src="https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="receiver.js"></script>

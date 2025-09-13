@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const cancelBtn = document.getElementById('cancel-btn');
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
+  const uploadSpeedMetrics = document.getElementById('upload-speed-metrics');
 
   const receivers = new Map();
   let filesQueue = [];
@@ -19,8 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalSentBytes = 0;
   let isSending = false;
 
+  // Performance Tuning Constants
   const CHUNK_SIZE = 64 * 1024; // 64 KB
-  const ACK_BATCH_SIZE = 256; // Send 16 chunks, then wait for ACK
+  const ACK_BATCH_SIZE = 256;   // Send 256 chunks (16MB), then wait for ACK
 
   // Map to hold the 'resolve' functions for pending ACK promises
   const ackResolvers = new Map();
@@ -30,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
   
-  // Central handler for incoming ACK messages
+  // Central handler for incoming ACK messages from receivers
   function handleAck(receiverSocketId) {
     if (ackResolvers.has(receiverSocketId)) {
       const resolve = ackResolvers.get(receiverSocketId);
@@ -62,7 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
       while (queue.length) dataChannel.send(queue.shift());
     };
     
-    // Set the onmessage handler to route ACKs
+    // Set the onmessage handler to route ACKs to our handler
     dataChannel.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'ack') {
@@ -106,7 +108,6 @@ document.addEventListener('DOMContentLoaded', () => {
     peerStatus.textContent = `Connected peers: ${count}`;
   });
 
-  // ✅ FIX: Restored the full code for the file input event listener
   fileInput.addEventListener('change', () => {
     const selectedFiles = Array.from(fileInput.files);
     filesQueue.push(...selectedFiles);
@@ -126,7 +127,6 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(`${selectedFiles.length} file(s) added to queue`);
   });
 
-  // ✅ FIX: Restored the full code for the send button event listener
   sendBtn.addEventListener('click', async () => {
     if (!receivers.size || !filesQueue.length || isSending) return;
     isSending = true;
@@ -156,8 +156,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     let offset = 0;
+    let lastTimestamp = Date.now();
+    let lastOffset = 0;
+
     while (offset < file.size) {
-      // 1. Send a batch of chunks
+      // Send a batch of chunks
       for (let i = 0; i < ACK_BATCH_SIZE && offset < file.size; i++) {
         const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
         const chunkBuffer = await chunkSlice.arrayBuffer();
@@ -169,7 +172,7 @@ document.addEventListener('DOMContentLoaded', () => {
         offset += chunkBuffer.byteLength;
       }
 
-      // 2. Wait for an ACK from every receiver
+      // Wait for an ACK from every connected receiver
       const ackPromises = [];
       for (const [id, { dataChannel }] of receivers.entries()) {
         if (dataChannel.readyState === 'open') {
@@ -184,7 +187,20 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       
       progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
+
+      // Calculate and display upload speed
+      const now = Date.now();
+      const timeDiffInSeconds = (now - lastTimestamp) / 1000;
+      if (timeDiffInSeconds >= 1) { // Update roughly every second
+          const bytesDiff = offset - lastOffset;
+          const speedMbps = (bytesDiff * 8) / timeDiffInSeconds / 1000000;
+          uploadSpeedMetrics.textContent = `Speed: ${speedMbps.toFixed(2)} Mbps`;
+          lastTimestamp = now;
+          lastOffset = offset;
+      }
     }
+
+    uploadSpeedMetrics.textContent = 'Speed: 0 Mbps';
 
     const doneMsg = JSON.stringify({ type: 'done' });
     receivers.forEach(({ dataChannel, queue }) => {
@@ -197,7 +213,6 @@ document.addEventListener('DOMContentLoaded', () => {
     sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes.toLocaleString()}`;
   }
 
-  // ✅ FIX: Restored the full code for the cancel button and room display listeners
   cancelBtn.addEventListener('click', () => {
     filesQueue = [];
     selectedFilesList.innerHTML = '';

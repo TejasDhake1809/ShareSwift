@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const roomDisplay = document.getElementById('room-display');
   const receivedMetrics = document.getElementById('received-metrics');
   const disconnectBtn = document.getElementById('disconnect-btn');
+  const downloadSpeedMetrics = document.getElementById('download-speed-metrics');
 
   let pc = null;
   let dataChannel = null;
@@ -17,8 +18,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
   
-  // NEW: Define how often to send an ACK (in number of chunks)
+  // Must match the sender's batch size
   const ACK_BATCH_SIZE = 256;
+
+  // Variable for speed calculation timer
+  let speedInterval = null;
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -92,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
       
-      // NEW: Increment chunk counter and send ACK if batch is complete
+      // Increment chunk counter and send ACK if batch is complete
       currentFile.chunksReceived++;
       if (currentFile.chunksReceived % ACK_BATCH_SIZE === 0 || currentFile.received >= currentFile.meta.size) {
         if (dataChannel.readyState === 'open') {
@@ -101,7 +105,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       updateProgress();
-      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
+      // The 'done' message is the official end, but we check size just in case.
+      if (currentFile.received >= currentFile.meta.size) {
+          // It's better to wait for the 'done' message to call finishCurrentFile.
+      }
     }
   }
 
@@ -111,12 +118,22 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    // MODIFIED: Added chunksReceived to track for ACKs
     const fileObj = { meta, buffer: [], received: 0, chunksReceived: 0, row };
     if (!currentFile) currentFile = fileObj;
     else fileQueue.push(fileObj);
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
+    
+    // Start the speed calculation interval
+    if (speedInterval) clearInterval(speedInterval);
+    let lastBytes = 0;
+    speedInterval = setInterval(() => {
+        if (!currentFile) return;
+        const currentBytes = currentFile.received;
+        const speedMbps = ((currentBytes - lastBytes) * 8) / 1000000;
+        downloadSpeedMetrics.textContent = `Speed: ${speedMbps.toFixed(2)} Mbps`;
+        lastBytes = currentBytes;
+    }, 1000); // Update every second
   }
 
   function updateProgress() {
@@ -127,6 +144,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function finishCurrentFile() {
     if (!currentFile) return;
+    
+    // Stop the speed calculation interval
+    if (speedInterval) {
+        clearInterval(speedInterval);
+        speedInterval = null;
+    }
+    downloadSpeedMetrics.textContent = 'Speed: 0 Mbps';
 
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
@@ -143,19 +167,38 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
     currentFile = fileQueue.shift() || null;
+    if (currentFile) {
+        // This logic can be improved, but for a simple queue it works.
+        // It assumes the 'header' for the next file has already been received.
+    }
   }
+  
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent)
+      .then(() => showToast('Room ID copied!', 'success'))
+      .catch(() => showToast('Failed to copy', 'error'));
+  });
 
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
     socket.emit('receiver-disconnect');
+    
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
+    
+    if (speedInterval) {
+        clearInterval(speedInterval);
+        speedInterval = null;
+    }
+    downloadSpeedMetrics.textContent = 'Speed: 0 Mbps';
     showToast("Disconnected from room", "info");
+
     dataChannel = null;
     pc = null;
     currentFile = null;
