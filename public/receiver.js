@@ -42,19 +42,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
-      .catch(err => {
-        console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
-      });
+      .catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
 
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
       if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
-
-    pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
 
     pc.ondatachannel = e => {
       dataChannel = e.channel;
@@ -84,6 +78,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ------------------- DATA HANDLING -------------------
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
@@ -91,20 +86,22 @@ document.addEventListener('DOMContentLoaded', () => {
       if (msg.type === 'header') {
         startNextFile(msg.meta);
       } else if (msg.type === 'done') {
-        // Only finalize if we already got all bytes
-        if (currentFile && currentFile.received >= currentFile.meta.size) {
-          finishCurrentFile();
-        }
+        finishCurrentFile();
       }
-    } else {
-      // Binary chunk
-      if (!currentFile) return;
 
+    } else {
+      // binary chunk
+      if (!currentFile) {
+        console.warn("Got data but no current file!");
+        return;
+      }
+
+      // push raw chunk
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
+
       updateProgress();
 
-      // If we already received everything, finalize immediately
       if (currentFile.received >= currentFile.meta.size) {
         finishCurrentFile();
       }
@@ -118,6 +115,8 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
+
+    // if no file is being processed → set it immediately
     if (!currentFile) {
       currentFile = fileObj;
     } else {
@@ -129,7 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    const percent = Math.floor((currentFile.received / currentFile.meta.size) * 100);
+    const percent = Math.min(100, (currentFile.received / currentFile.meta.size) * 100);
     currentFile.row.querySelector('.progress-bar-fill').style.width = `${percent}%`;
   }
 
@@ -145,15 +144,18 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.removeChild(a);
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
+
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    // Move to next file if queued
+    // move to next file if queued
     currentFile = fileQueue.shift() || null;
   }
 
+  // ------------------- UI -------------------
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
     navigator.clipboard.writeText(roomDisplay.textContent)
