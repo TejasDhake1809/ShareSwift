@@ -115,6 +115,18 @@ io.on('connection', socket => {
     });
   });
 
+  socket.on('test-ready-for-transfer', ({ to }) => {
+    io.to(to).emit('test-ready-for-transfer', { from: socket.id });
+  });
+
+  socket.on('test-simulated-chunk', ({ to, payload }) => {
+      io.to(to).emit('test-simulated-chunk', { from: socket.id, payload });
+  });
+
+  socket.on('test-transfer-done', ({ to }) => {
+      io.to(to).emit('test-transfer-done', { from: socket.id });
+  });
+
   // Handle socket disconnect
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);

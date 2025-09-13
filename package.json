@@ -16,6 +16,7 @@
     "nodemon": "^3.1.10",
     "puppeteer": "^24.20.0",
     "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
     "uuid": "^8.3.2"
   }
 }
