@@ -1,6 +1,9 @@
+// sender.js
+
 document.addEventListener('DOMContentLoaded', () => {
     const socket = io({ transports: ['websocket'] });
 
+    // ... (keep all the variable declarations and UI element getters) ...
     const createRoomBtn = document.getElementById('create-room-btn');
     const sharePanel = document.getElementById('share-panel');
     const roomDisplay = document.getElementById('room-display-persistent');
@@ -19,11 +22,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let totalSentBytes = 0;
     let isSending = false;
 
+
     function showToast(msg, type = "info") {
         const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
         Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
     }
 
+    // ... (keep all socket listeners from 'create-room-btn' down to 'sendBtn.addEventListener') ...
     createRoomBtn.addEventListener('click', () => socket.emit('create-room'));
 
     socket.on('room-created', ({ roomId }) => {
@@ -41,14 +46,12 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
         const pc = new RTCPeerConnection({ iceServers });
-
         const dataChannel = pc.createDataChannel("files", { ordered: true });
         dataChannel.binaryType = "arraybuffer";
 
-        // ✅ CHANGED: Increased buffer threshold for better performance on fast networks.
         const BUFFER_THRESHOLD = 64 * 1024 * 1024; // 64MB
         dataChannel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
-
+        
         const queue = [];
         receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
@@ -70,7 +73,6 @@ document.addEventListener('DOMContentLoaded', () => {
         socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
     });
 
-    // ... (keep all other socket listeners: 'answer', 'ice-candidate', etc. They are correct)
     socket.on('answer', async ({ from, answer }) => {
         const conn = receivers.get(from);
         if (!conn) return;
@@ -131,12 +133,11 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast("All files sent!", "success");
     });
 
-    async function sendFile(file) {
-        // ✅ CHANGED: Increased chunk size for better performance.
-        const CHUNK_SIZE = 256 * 1024; // 256KB
-        let offset = 0;
 
-        // ✨ NEW: Variables for tracking transfer speed and ETA.
+    // ✅ REWRITTEN FUNCTION: This is a complete replacement of the old sendFile function.
+    async function sendFile(file) {
+        const CHUNK_SIZE = 256 * 1024;
+        let offset = 0;
         let lastBytesSent = 0;
         let lastTimestamp = Date.now();
         let progressInterval;
@@ -144,108 +145,80 @@ document.addEventListener('DOMContentLoaded', () => {
         const meta = { filename: file.name, size: file.size, type: file.type };
         const row = document.createElement('div');
         row.className = 'file-entry';
-        // ✨ NEW: Added a stats div for speed and ETA.
         row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div><div class="stats"></div>`;
         filesList.appendChild(row);
         const statsDiv = row.querySelector('.stats');
+        const progressBarFill = row.querySelector('.progress-bar-fill');
 
-        receivers.forEach(({ dataChannel, queue }) => {
-            const header = JSON.stringify({ type: "header", meta });
-            if (dataChannel.readyState === 'open') dataChannel.send(header);
-            else queue.push(header);
+        // Send file header
+        receivers.forEach(({ dataChannel }) => {
+            dataChannel.send(JSON.stringify({ type: "header", meta }));
         });
 
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            let isReading = false;
-
-            // ✨ NEW: Timer to update speed and ETA every second.
-            progressInterval = setInterval(() => {
-                const now = Date.now();
-                const interval = (now - lastTimestamp) / 1000; // in seconds
-                if (interval > 0) {
-                    const bytesSinceLast = offset - lastBytesSent;
-                    const speed = bytesSinceLast / interval; // bytes per second
-                    const remainingBytes = file.size - offset;
-                    const eta = remainingBytes / speed; // seconds
-
-                    statsDiv.textContent = `${(speed / 1024 / 1024).toFixed(2)} MB/s | ETA: ${Math.round(eta)}s`;
-                }
-                lastBytesSent = offset;
-                lastTimestamp = now;
-            }, 1000);
-
-            function readSlice() {
-                if (isReading || offset >= file.size) return;
-                isReading = true;
-                const slice = file.slice(offset, offset + CHUNK_SIZE);
-                reader.readAsArrayBuffer(slice);
+        // ✨ NEW: Helper function that returns a promise that resolves when a data channel's buffer is drained.
+        const waitForDataChannelDrain = (channel) => {
+            if (channel.bufferedAmount < channel.bufferedAmountLowThreshold) {
+                return Promise.resolve();
             }
-
-            function sendChunk(chunk) {
-                receivers.forEach(({ dataChannel }) => {
-                    if (dataChannel.readyState === 'open') {
-                        dataChannel.send(chunk);
-                    }
-                });
-
-                offset += chunk.byteLength;
-                row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
-
-                if (offset >= file.size) {
-                    clearInterval(progressInterval); // ✨ NEW: Stop the timer
-                    statsDiv.textContent = 'Done!';
-                    receivers.forEach(({ dataChannel }) => {
-                        dataChannel.send(JSON.stringify({ type: 'done' }));
-                        dataChannel.onbufferedamountlow = null;
-                    });
-                    totalSentFiles++;
-                    totalSentBytes += file.size;
-                    sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
+            return new Promise(resolve => {
+                channel.onbufferedamountlow = () => {
+                    channel.onbufferedamountlow = null; // Remove listener
                     resolve();
-                    return;
-                }
-
-                const allReady = [...receivers.values()].every(
-                    r => r.dataChannel.bufferedAmount < r.dataChannel.bufferedAmountLowThreshold
-                );
-
-                if (allReady) {
-                    readSlice();
-                }
-            }
-
-            reader.onload = (e) => {
-                isReading = false;
-                sendChunk(e.target.result);
-            };
-
-
-
-            reader.onerror = (err) => {
-                isReading = false;
-                clearInterval(progressInterval); // ✨ NEW: Stop the timer on error
-                statsDiv.textContent = 'Error!';
-                console.error("FileReader error:", err);
-                reject(err);
-            };
-
-            receivers.forEach(({ dataChannel }) => {
-                dataChannel.onbufferedamountlow = () => {
-                    const allReady = [...receivers.values()].every(
-                        r => r.dataChannel.bufferedAmount < r.dataChannel.bufferedAmountLowThreshold
-                    );
-                    if (allReady) {
-                        readSlice();
-                    }
                 };
             });
+        };
 
-            readSlice();
+        // Start the progress timer
+        progressInterval = setInterval(() => {
+            const now = Date.now();
+            const interval = (now - lastTimestamp) / 1000;
+            if (interval > 0) {
+                const speed = (offset - lastBytesSent) / interval;
+                const remainingBytes = file.size - offset;
+                const eta = speed > 0 ? remainingBytes / speed : Infinity;
+                statsDiv.textContent = `${(speed / 1024 / 1024).toFixed(2)} MB/s | ETA: ${isFinite(eta) ? Math.round(eta) : '...'}s`;
+            }
+            lastBytesSent = offset;
+            lastTimestamp = now;
+        }, 1000);
+
+        // ✨ NEW: The main sending logic is now a controlled while loop.
+        while (offset < file.size) {
+            // 1. Wait for all channels to have space in their buffers. This is the key change.
+            const drainPromises = [];
+            receivers.forEach(({ dataChannel }) => {
+                drainPromises.push(waitForDataChannelDrain(dataChannel));
+            });
+            await Promise.all(drainPromises);
+
+            // 2. Read the next chunk of the file.
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            // ✨ NEW: Using the modern blob.arrayBuffer() which returns a promise. No more FileReader events.
+            const chunk = await slice.arrayBuffer();
+            
+            // 3. Send the chunk to all receivers.
+            receivers.forEach(({ dataChannel }) => {
+                dataChannel.send(chunk);
+            });
+
+            // 4. Update offset and UI.
+            offset += chunk.byteLength;
+            progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
+        }
+
+        // --- Cleanup after the loop finishes ---
+        clearInterval(progressInterval);
+        statsDiv.textContent = 'Done!';
+        receivers.forEach(({ dataChannel }) => {
+            dataChannel.send(JSON.stringify({ type: 'done' }));
         });
+
+        totalSentFiles++;
+        totalSentBytes += file.size;
+        sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
     }
 
-    // ... (keep the cancelBtn and roomDisplay listeners)
+    // ... (keep cancelBtn and roomDisplay listeners)
     cancelBtn.addEventListener('click', () => {
         filesQueue = [];
         selectedFilesList.innerHTML = '';
