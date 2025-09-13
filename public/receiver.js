@@ -3,7 +3,7 @@
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
 
-  streamSaver.mitm = 'public/mitm.html';
+  streamSaver.mitm = './mitm.html';
 
   const joinInput = document.getElementById('join-room-input');
   const joinBtn = document.getElementById('join-room-btn');
