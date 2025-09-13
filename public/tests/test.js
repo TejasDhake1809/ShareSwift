@@ -1,157 +1,120 @@
-const { io } = require("socket.io-client");
+const puppeteer = require('puppeteer');
+const path = require('path');
 
 // --- Configuration ---
-const SERVER_URL = "https://shareswift-1.onrender.com"; 
-const NUM_CLIENTS = 10;
-// MODIFIED: Significantly increased the delay to prevent server overload
-const JOIN_DELAY_MS = 250; // Before: 25. This gives the server time to process each client.
-const CLIENT_TIMEOUT_MS = 30000; // 30 seconds per client
-const SERVER_WARMUP_DELAY_MS = 10000; // 10 seconds (still good practice)
+// 1. Manually start the sender page in your own browser and create a room.
+// 2. Paste the Room ID you receive here.
+const MANUAL_ROOM_ID = "034286"; // <--- IMPORTANT: SET THIS VALUE
 
-// --- File Transfer Simulation ---
-const SIMULATE_FILE_TRANSFER = true;
-const SIMULATED_CHUNK_COUNT = 256; // 256 chunks * 64KB = 16MB simulated file
+// 3. Set how many concurrent receivers you want to test.
+const NUM_RECEIVERS = 100;
+const LAUNCH_STAGGER_MS = 250; // Stagger helps prevent initial CPU spike
+
+const SERVER_URL = "https://shareswift-1.onrender.com";
+const TEST_TIMEOUT_MS = 120000; // 2 minutes, generous for multiple downloads
 // ---------------------
 
-let successfulHandshakes = 0;
-let successfulTransfers = 0;
-let failedConnections = 0;
-let clientsDone = 0;
-
-console.log(`--- Starting Concurrent Load Test ---`);
-console.log(`Server: ${SERVER_URL}`);
-console.log(`Simulating: 1 Sender, ${NUM_CLIENTS} Receivers`);
-if (SIMULATE_FILE_TRANSFER) {
-  console.log(`File Transfer Simulation: ENABLED (${SIMULATED_CHUNK_COUNT} chunks per client)`);
-}
-console.log(`-------------------------------------\n`);
-
-// This function simulates a single receiver client.
-const createReceiver = (roomId) => {
-  const socket = io(SERVER_URL, {
-    transports: ["websocket"],
-    reconnection: false, 
-  });
-
-  let hasFinished = false; // Flag to prevent double-counting errors/successes
-
-  // Add a timeout for each client. If it doesn't finish in time, count it as a failure.
-  const clientTimeout = setTimeout(() => {
-    if (hasFinished) return;
-    hasFinished = true;
-    failedConnections++;
-    console.error(`❌ A client timed out after ${CLIENT_TIMEOUT_MS / 1000}s.`);
-    socket.disconnect(); // This triggers the 'disconnect' event, which calls checkCompletion()
-  }, CLIENT_TIMEOUT_MS);
-
-  socket.on("connect", () => {
-    socket.emit("receiver-join", { roomId });
-  });
-
-  socket.on("offer", ({ from }) => {
-    socket.emit("answer", { to: from, answer: { type: "dummy-answer" } });
-  });
-
-  socket.on("ice-candidate", ({ from }) => {
-    if (hasFinished) return; 
-    successfulHandshakes++;
-    console.log(`🤝 Handshake #${successfulHandshakes} complete.`);
-    socket.emit("test-ready-for-transfer", { to: from });
-  });
-
-  if (SIMULATE_FILE_TRANSFER) {
-    socket.on("test-transfer-done", () => {
-        if (hasFinished) return;
-        successfulTransfers++;
-        console.log(`✅ Transfer #${successfulTransfers} complete for client.`);
-        socket.disconnect();
-    });
-  } else {
-      socket.on("ice-candidate", () => {
-          if (!hasFinished) socket.disconnect();
-      });
-  }
-
-  socket.on("connect_error", (err) => {
-    if (hasFinished) return;
-    hasFinished = true;
-    failedConnections++;
-    console.error(`❌ Client connection failed: ${err.message}`);
-    clearTimeout(clientTimeout);
-    checkCompletion();
-  });
-
-  socket.on("no-sender", ({ message }) => {
-    if (hasFinished) return;
-    hasFinished = true;
-    failedConnections++;
-    console.error(`❌ Client failed to join: ${message}`);
-    clearTimeout(clientTimeout);
-    checkCompletion();
-  });
-
-  socket.on("disconnect", () => {
-    if (hasFinished) return;
-    hasFinished = true;
-    clientsDone++;
-    clearTimeout(clientTimeout); 
-    checkCompletion();
-  });
-};
-
-// Main test orchestrator
-const runTest = async () => {
-  console.log("Phase 1: Creating a room with a single sender...");
+async function launchReceiver(browser, receiverId) {
+  console.log(`[Receiver #${receiverId}] Launching in new browser context...`);
+  // ✅ FIX: The correct modern Puppeteer method is `createBrowserContext()`.
+  // This creates the isolated "incognito" session needed for parallel tests.
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
   
-  const senderSocket = io(SERVER_URL, { transports: ["websocket"] });
-
-  const getRoomId = new Promise((resolve, reject) => {
-    senderSocket.on("connect", () => senderSocket.emit("create-room"));
-    senderSocket.on("room-created", ({ roomId }) => {
-      console.log(`🏠 Room created with ID: ${roomId}\n`);
-      resolve(roomId);
-    });
-    senderSocket.on("connect_error", reject);
-  });
-
   try {
-    const roomId = await getRoomId;
+    // Navigate to the receiver page
+    await page.goto(`${SERVER_URL}/receiver.html`, { waitUntil: 'networkidle2' });
+
+    // Type the Room ID and join
+    await page.waitForSelector('#join-room-input', { visible: true });
+    await page.type('#join-room-input', MANUAL_ROOM_ID);
+    await page.click('#join-room-btn');
+    console.log(`[Receiver #${receiverId}] Joined room ${MANUAL_ROOM_ID}.`);
+
+    // Wait for the receive panel to show up, indicating a successful connection
+    await page.waitForSelector('#receive-panel:not(.hidden)', { timeout: 30000 });
+    console.log(`[Receiver #${receiverId}] ✅ Connection to sender established.`);
+
+    // Wait for the downloaded file entry to appear
+    await page.waitForSelector('#received-files .file-entry', { timeout: 30000 });
+    const receivedFilename = await page.$eval('#received-files .fname', el => el.textContent);
+    console.log(`[Receiver #${receiverId}] Detected incoming file: ${receivedFilename}`);
     
-    // MODIFIED: Wait for the server to warm up before launching receivers
-    console.log(`Server is waking up... waiting ${SERVER_WARMUP_DELAY_MS / 1000} seconds.`);
-    await new Promise(resolve => setTimeout(resolve, SERVER_WARMUP_DELAY_MS));
+    // Final success metric: Wait for the progress bar to be 100%
+    await page.waitForFunction(
+      () => document.querySelector('#received-files .progress-bar-fill').style.width === '100%',
+      { timeout: 60000 } // Give more time for the actual download
+    );
     
-    if (SIMULATE_FILE_TRANSFER) {
-      senderSocket.on("test-ready-for-transfer", ({ from }) => {
-        console.log(`\n🚀 Starting simulated file transfer to client ${from}...`);
-        for (let i = 0; i < SIMULATED_CHUNK_COUNT; i++) {
-          senderSocket.emit("test-simulated-chunk", { to: from, payload: `chunk-${i}` }); 
-        }
-        senderSocket.emit("test-transfer-done", { to: from });
-      });
-    }
-    
-    console.log(`Phase 2: Launching ${NUM_CLIENTS} receivers...\n`);
-    for (let i = 0; i < NUM_CLIENTS; i++) {
-      setTimeout(() => createReceiver(roomId), i * JOIN_DELAY_MS);
-    }
+    console.log(`[Receiver #${receiverId}] ✅🎉 File download successful!`);
+    return { status: 'succeeded', id: receiverId };
 
   } catch (error) {
-    console.error("❌ Critical Error: Could not create room with sender.", error.message);
-    process.exit(1);
+    console.error(`[Receiver #${receiverId}] ❌ FAILED: ${error.message.split('\n')[0]}`);
+    return { status: 'failed', id: receiverId, error: error.message };
+  } finally {
+    // Clean up by closing the entire context and its pages.
+    await context.close();
+    console.log(`[Receiver #${receiverId}] Context closed.`);
   }
-};
+}
 
-function checkCompletion() {
-  if (clientsDone + failedConnections >= NUM_CLIENTS) {
-    console.log(`\n--- Test Complete ---`);
-    console.log(`Successful Handshakes: ${successfulHandshakes} / ${NUM_CLIENTS}`);
-    if (SIMULATE_FILE_TRANSFER) {
-      console.log(`Successful Transfers:  ${successfulTransfers} / ${NUM_CLIENTS}`);
+// Helper function for creating a delay
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function runTest() {
+  if (MANUAL_ROOM_ID === "YOUR_ROOM_ID_HERE") {
+    console.error("❌ ERROR: Please set the MANUAL_ROOM_ID in the script before running.");
+    return;
+  }
+
+  console.log(`🚀 Launching test for ${NUM_RECEIVERS} receivers...`);
+  let browser;
+
+  const testTimeout = setTimeout(() => {
+    console.error("❌ GLOBAL TIMEOUT! The entire test took too long.");
+    if (browser) browser.close();
+    process.exit(1);
+  }, TEST_TIMEOUT_MS);
+
+  try {
+    browser = await puppeteer.launch({ 
+      headless: true, // Change to `false` to see all the browsers open
+      args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+    });
+
+    console.log(`\n--- Starting ${NUM_RECEIVERS} concurrent receiver(s) with a ${LAUNCH_STAGGER_MS}ms stagger ---\n`);
+    
+    const receiverIds = Array.from({ length: NUM_RECEIVERS }, (_, i) => i + 1);
+
+    // This code still runs all tests in parallel, but each one gets its own isolated context.
+    const results = await Promise.all(
+      receiverIds.map(async (id) => {
+        await delay(id * LAUNCH_STAGGER_MS);
+        return launchReceiver(browser, id);
+      })
+    );
+
+    console.log("\n--- TEST COMPLETE ---");
+    const successfulCount = results.filter(r => r.status === 'succeeded').length;
+    console.log(`✅ ${successfulCount} / ${NUM_RECEIVERS} receivers successfully downloaded the file.`);
+    
+    const failedCount = NUM_RECEIVERS - successfulCount;
+    if (failedCount > 0) {
+        console.log(`❌ ${failedCount} / ${NUM_RECEIVERS} receivers failed.`);
     }
-    console.log(`Failed Connections:    ${failedConnections}`);
-    console.log(`---------------------\n`);
-    process.exit(0);
+    console.log("---------------------\n");
+
+  } catch (error) {
+    console.error("\n❌ --- A CRITICAL ERROR OCCURRED --- ❌");
+    console.error(error);
+    process.exit(1);
+  } finally {
+    clearTimeout(testTimeout);
+    if (browser) {
+      await browser.close();
+      console.log("Browser closed.");
+    }
   }
 }
 
