@@ -13,13 +13,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let pc = null;
   let dataChannel = null;
-
-  // Track files
-  let currentFile = null;
   let fileQueue = [];
-  let pendingChunks = []; // chunks received before header
-  let totalFiles = 0;
-  let totalBytes = 0;
+  let currentFile = null;
+  let pendingChunks = [];
+  let totalFiles = 0, totalBytes = 0;
 
   function log(msg) {
     console.log(`[Receiver] ${msg}`);
@@ -27,21 +24,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
-    Toastify({ text: msg, duration: 3000, gravity: "top", position: "right", style: { background: bg } }).showToast();
+    Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
   }
 
   joinBtn.addEventListener('click', () => {
     const roomId = joinInput.value.trim();
     if (!roomId) return showToast('Enter Room ID', 'error');
     joinStatus.textContent = 'Joining...';
-    log(`Attempting to join room ${roomId}`);
     socket.emit('receiver-join', { roomId });
   });
 
   socket.on('no-sender', ({ message }) => {
     joinStatus.textContent = message;
     showToast(message, 'error');
-    log(`No sender available: ${message}`);
   });
 
   socket.on('offer', async ({ from, offer }) => {
@@ -49,7 +44,6 @@ document.addEventListener('DOMContentLoaded', () => {
     roomDisplay.textContent = roomId;
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
-    log(`Received offer from sender ${from}`);
 
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
@@ -58,10 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
-      if (e.candidate) {
-        socket.emit('ice-candidate', { to: from, candidate: e.candidate });
-        log(`Sending ICE candidate to sender`);
-      }
+      if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
 
     pc.ondatachannel = e => {
@@ -72,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", "success");
-        log("Data channel is open");
+        log("Data channel open");
       };
 
       dataChannel.onmessage = handleDataMessage;
@@ -82,17 +73,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit('answer', { to: from, answer: pc.localDescription });
-    log("Sent answer back to sender");
   });
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
     try {
       await pc.addIceCandidate(candidate);
-      log("Added ICE candidate");
     } catch (err) {
       console.warn(err);
-      log("Failed to add ICE candidate");
     }
   });
 
@@ -102,8 +90,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const msg = JSON.parse(e.data);
       log(`Received message type: ${msg.type}`);
 
-      if (msg.type === 'header') startNextFile(msg.meta);
-      else if (msg.type === 'done') finishCurrentFile();
+      if (msg.type === 'header') {
+        startNextFile(msg.meta);
+      } else if (msg.type === 'done') {
+        if (pendingChunks.length && currentFile) {
+          log(`Flushing ${pendingChunks.length} pending chunks before finishing file`);
+          pendingChunks.forEach(chunk => {
+            currentFile.buffer.push(chunk);
+            currentFile.received += chunk.byteLength;
+          });
+          pendingChunks = [];
+          updateProgress();
+        }
+        finishCurrentFile();
+      }
+
     } else {
       log(`Received chunk: ${e.data.byteLength} bytes`);
       if (!currentFile) {
@@ -115,14 +116,10 @@ document.addEventListener('DOMContentLoaded', () => {
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
       updateProgress();
-
-      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
 
   function startNextFile(meta) {
-    log(`Starting next file: ${meta.filename} (${meta.size} bytes)`);
-
     const row = document.createElement('div');
     row.className = 'file-entry';
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
@@ -130,12 +127,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const fileObj = { meta, buffer: [], received: 0, row };
 
+    // if no file is being processed → set it immediately
     if (!currentFile) {
       currentFile = fileObj;
-
-      // Flush pending chunks
+      log(`Started receiving file: ${meta.filename}`);
+      // flush any pending chunks if they exist
       if (pendingChunks.length) {
-        log(`Flushing ${pendingChunks.length} pending chunks`);
+        log(`Flushing ${pendingChunks.length} pending chunks to new file`);
         pendingChunks.forEach(chunk => {
           currentFile.buffer.push(chunk);
           currentFile.received += chunk.byteLength;
@@ -146,8 +144,6 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       fileQueue.push(fileObj);
     }
-
-    showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
@@ -174,25 +170,18 @@ document.addEventListener('DOMContentLoaded', () => {
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
     currentFile = fileQueue.shift() || null;
-
-    if (currentFile && pendingChunks.length) {
-      log(`Flushing ${pendingChunks.length} pending chunks for next file`);
-      pendingChunks.forEach(chunk => {
-        currentFile.buffer.push(chunk);
-        currentFile.received += chunk.byteLength;
-      });
-      pendingChunks = [];
-      updateProgress();
-    }
   }
 
   // ------------------- UI -------------------
   roomDisplay.addEventListener('click', () => {
     if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast('Room ID copied!', 'success'));
+    navigator.clipboard.writeText(roomDisplay.textContent)
+      .then(() => showToast('Room ID copied!', 'success'))
+      .catch(() => showToast('Failed to copy', 'error'));
   });
 
   disconnectBtn.addEventListener('click', () => {
@@ -207,13 +196,13 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
 
-    log("Disconnected from room");
+    showToast("Disconnected from room", "info");
 
     dataChannel = null;
     pc = null;
     currentFile = null;
-    fileQueue = [];
     pendingChunks = [];
+    fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
   });
