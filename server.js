@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -23,11 +22,12 @@ app.get("/ice-servers", async (req, res) => {
   }
 });
 
-// Map roomId -> { sender: socketId, receivers: Set<socketId> }
+// Map roomId -> { sender: socketId, receivers: Set<socketId>, iceServerCache: Array | null }
 const rooms = new Map();
 
 // Helper: fetch Twilio ICE servers
 async function getTwilioIceServers() {
+  // This function is now only called once per room, not once per user.
   try {
     const response = await axios.post(
       `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Tokens.json`,
@@ -42,7 +42,6 @@ async function getTwilioIceServers() {
     return response.data.ice_servers;
   } catch (err) {
     console.error('Failed to fetch Twilio ICE servers:', err.message);
-    // fallback to only STUN
     return [{ urls: 'stun:stun.l.google.com:19302' }];
   }
 }
@@ -50,10 +49,11 @@ async function getTwilioIceServers() {
 io.on('connection', socket => {
   console.log('Socket connected:', socket.id);
 
-  // Sender creates a room
+  // Sender creates a room, initializing the ICE server cache to null
   socket.on('create-room', () => {
-    const roomId = uuidv4().slice(0, 6); // short 6-char ID
-    rooms.set(roomId, { sender: socket.id, receivers: new Set() });
+    const roomId = uuidv4().slice(0, 6);
+    // ✅ MODIFIED: Initialize room with a null cache for ICE servers
+    rooms.set(roomId, { sender: socket.id, receivers: new Set(), iceServerCache: null });
     socket.join(roomId);
     console.log(`Room created: ${roomId} by ${socket.id}`);
     socket.emit('room-created', { roomId });
@@ -69,25 +69,32 @@ io.on('connection', socket => {
     room.receivers.add(socket.id);
     socket.join(roomId);
 
-    // Fetch ICE servers
-    const iceServers = await getTwilioIceServers();
-
-    // Send ICE servers to this receiver
+    // ✅ MODIFIED: Caching logic for ICE servers
+    let iceServers;
+    if (room.iceServerCache) {
+      // If cache exists, use it instantly. No API call.
+      console.log(`Using cached ICE servers for room ${roomId}`);
+      iceServers = room.iceServerCache;
+    } else {
+      // If cache is empty, fetch from Twilio ONCE and store the result.
+      console.log(`Fetching NEW ICE servers for room ${roomId}`);
+      iceServers = await getTwilioIceServers();
+      room.iceServerCache = iceServers; // Store in cache for next user
+    }
+    
+    // Send the retrieved (or cached) ICE servers to the clients
     socket.emit('ice-config', { iceServers });
-
-    // Send ICE servers to sender too
     io.to(room.sender).emit('ice-config', { iceServers });
-
-    // Notify sender about new receiver count
+    
+    // Notify sender and initialize connection
     io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
-
-    // Initialize connection for new receiver
     io.to(room.sender).emit('init', { receiverSocketId: socket.id });
 
     console.log(`Receiver ${socket.id} joined room ${roomId}`);
   });
 
-  // Relay offer/answer and ICE candidates
+  // --- All other event handlers remain the same ---
+
   socket.on('offer', ({ to, offer }) => {
     io.to(to).emit('offer', { from: socket.id, offer });
   });
@@ -100,50 +107,39 @@ io.on('connection', socket => {
     io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
-  // Receiver manually disconnects
   socket.on('receiver-disconnect', () => {
     rooms.forEach((room, roomId) => {
       if (room.receivers.has(socket.id)) {
         room.receivers.delete(socket.id);
-
-        // Notify the sender
         io.to(room.sender).emit('receiver-disconnect', { receiverId: socket.id });
         io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
-
         console.log('Receiver manually disconnected:', socket.id);
       }
     });
   });
 
+  // Handlers for the test script
   socket.on('test-ready-for-transfer', ({ to }) => {
     io.to(to).emit('test-ready-for-transfer', { from: socket.id });
   });
-
   socket.on('test-simulated-chunk', ({ to, payload }) => {
-      io.to(to).emit('test-simulated-chunk', { from: socket.id, payload });
+    io.to(to).emit('test-simulated-chunk', { from: socket.id, payload });
   });
-
   socket.on('test-transfer-done', ({ to }) => {
-      io.to(to).emit('test-transfer-done', { from: socket.id });
+    io.to(to).emit('test-transfer-done', { from: socket.id });
   });
 
-  // Handle socket disconnect
+  // Disconnect logic
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
-
     rooms.forEach((room, roomId) => {
       if (room.sender === socket.id) {
-        // Notify all receivers that sender disconnected
         room.receivers.forEach(rid => io.to(rid).emit('sender-disconnected'));
         rooms.delete(roomId);
       } else if (room.receivers.has(socket.id)) {
         room.receivers.delete(socket.id);
-
-        // Notify sender about this receiver leaving
         io.to(room.sender).emit('receiver-disconnect', { receiverId: socket.id });
         io.to(room.sender).emit('update-receivers', { count: room.receivers.size });
-
-        console.log('Receiver disconnected:', socket.id);
       }
     });
   });
@@ -151,3 +147,4 @@ io.on('connection', socket => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
