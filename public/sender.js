@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map();
+  const receivers = new Map(); // receiverId -> { pc, dataChannel }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
@@ -38,14 +38,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
-    dataChannel.bufferedAmountLowThreshold = 256 * 1024;
-    const queue = [];
-    receivers.set(receiverSocketId, { pc, dataChannel, queue });
+    receivers.set(receiverSocketId, { pc, dataChannel });
 
-    dataChannel.onopen = () => {
-      log(`Data channel open for receiver ${receiverSocketId}`);
-      while (queue.length) dataChannel.send(queue.shift());
-    };
+    dataChannel.onopen = () => log(`Data channel open for receiver ${receiverSocketId}`);
     dataChannel.onmessage = e => log(`Received from ${receiverSocketId}: ${e.data}`);
 
     pc.onicecandidate = event => {
@@ -117,7 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast("All files sent!", "success");
   });
 
-  // ---------------- SEND FILE ----------------
+  // ---------------- SEND FILE WITH CHUNK ACK ----------------
   async function sendFile(file) {
     return new Promise(resolve => {
       const meta = { filename: file.name, size: file.size, type: file.type };
@@ -129,75 +124,50 @@ document.addEventListener('DOMContentLoaded', () => {
       row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
       filesList.appendChild(row);
 
-      receivers.forEach(({ dataChannel, queue }) => {
-        const header = JSON.stringify({ type: "header", fileId, meta });
-        if (dataChannel.readyState === 'open') dataChannel.send(header);
-        else queue.push(header);
-        log(`Header sent/queued`);
-      });
+      // Send header
+      receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: "header", fileId, meta })));
 
       const chunkSize = 16384;
-      let offset = 0;
+      const totalChunks = Math.ceil(file.size / chunkSize);
+      let chunkIndex = 0;
+
       const reader = new FileReader();
 
-      reader.onload = async e => {
-        const chunkData = e.target.result;
+      // ACK listener
+      function onAck(e) {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'ack' && msg.fileId === fileId && msg.chunkIndex === chunkIndex - 1) {
+          sendNextChunk();
+        }
+      }
 
-        const sendChunk = () => {
-          const encoder = new TextEncoder();
-          const fileIdBytes = encoder.encode(fileId);
-          const buffer = new Uint8Array(1 + fileIdBytes.length + chunkData.byteLength);
-          buffer[0] = fileIdBytes.length;
-          buffer.set(fileIdBytes, 1);
-          buffer.set(new Uint8Array(chunkData), 1 + fileIdBytes.length);
+      receivers.forEach(({ dataChannel }) => dataChannel.addEventListener('message', onAck));
 
-          receivers.forEach(({ dataChannel, queue }) => {
-            if (dataChannel.readyState === 'open') {
-              if (dataChannel.bufferedAmount > dataChannel.bufferedAmountLowThreshold) {
-                dataChannel.onbufferedamountlow = () => {
-                  dataChannel.send(buffer);
-                  dataChannel.onbufferedamountlow = null;
-                  log(`Chunk sent after buffer low`);
-                };
-              } else {
-                dataChannel.send(buffer);
-                log(`Chunk sent ${offset + chunkData.byteLength}/${file.size}`);
-              }
-            } else queue.push(buffer);
-          });
-
-          offset += chunkData.byteLength;
-          row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
-
-          if (offset < file.size) readSlice(offset);
-          else sendDoneToAll();
-        };
-
-        const sendDoneToAll = async () => {
-          for (const { dataChannel, queue } of receivers.values()) {
-            const done = JSON.stringify({ type: 'done', fileId });
-            await new Promise(res => {
-              const sendFunc = () => {
-                if (dataChannel.bufferedAmount > dataChannel.bufferedAmountLowThreshold) {
-                  dataChannel.onbufferedamountlow = () => { dataChannel.send(done); res(); dataChannel.onbufferedamountlow = null; };
-                } else { dataChannel.send(done); res(); }
-              };
-              sendFunc();
-            });
-            log(`Done sent for ${file.name}`);
-          }
+      function sendNextChunk() {
+        if (chunkIndex >= totalChunks) {
+          receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify({ type: 'done', fileId })));
+          receivers.forEach(({ dataChannel }) => dataChannel.removeEventListener('message', onAck));
           totalSentFiles++;
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
-          log(`Finished sending ${file.name}`);
           resolve();
-        };
+          return;
+        }
 
-        sendChunk();
+        const start = chunkIndex * chunkSize;
+        const end = Math.min(file.size, start + chunkSize);
+        reader.readAsArrayBuffer(file.slice(start, end));
+      }
+
+      reader.onload = e => {
+        const chunkData = e.target.result;
+        const msg = { type: "chunk", fileId, chunkIndex, chunk: chunkData };
+        receivers.forEach(({ dataChannel }) => dataChannel.send(JSON.stringify(msg)));
+        row.querySelector('.progress-bar-fill').style.width = `${Math.floor(((chunkIndex + 1) / totalChunks) * 100)}%`;
+        chunkIndex++;
       };
 
-      function readSlice(o) { reader.readAsArrayBuffer(file.slice(o, o + chunkSize)); }
-      readSlice(0);
+      sendNextChunk();
     });
   }
 
