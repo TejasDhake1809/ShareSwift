@@ -134,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   async function sendFile(file) {
-    const CHUNK_SIZE = 16384;
+    const CHUNK_SIZE = 64 * 1024; // Increased chunk size slightly
     let offset = 0;
 
     const meta = { filename: file.name, size: file.size, type: file.type };
@@ -151,28 +151,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
+      let isReading = false;
 
       function readSlice() {
+        if (isReading || offset >= file.size) return;
+        isReading = true;
         const slice = file.slice(offset, offset + CHUNK_SIZE);
         reader.readAsArrayBuffer(slice);
       }
 
       function sendChunk(chunk) {
-        receivers.forEach(({ dataChannel, queue }) => {
-          if (dataChannel.readyState === 'open') {
-            dataChannel.send(chunk);
-          }
+        receivers.forEach(({ dataChannel }) => {
+            // This is the point of failure. We send to everyone.
+            if (dataChannel.readyState === 'open') {
+                dataChannel.send(chunk);
+            }
         });
 
         offset += chunk.byteLength;
         row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
 
-        if (offset < file.size) {
-          const firstReceiver = receivers.values().next().value;
-          if (firstReceiver && firstReceiver.dataChannel.bufferedAmount < firstReceiver.dataChannel.bufferedAmountLowThreshold) {
-            readSlice();
-          }
-        } else {
+        if (offset >= file.size) {
           receivers.forEach(({ dataChannel }) => {
             dataChannel.send(JSON.stringify({ type: 'done' }));
             dataChannel.onbufferedamountlow = null;
@@ -181,27 +180,45 @@ document.addEventListener('DOMContentLoaded', () => {
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
           resolve();
+          return;
         }
+
+        // ✅ KEY FIX: Check if ALL receivers are ready for more data.
+        const allReady = [...receivers.values()].every(
+          r => r.dataChannel.bufferedAmount < r.dataChannel.bufferedAmountLowThreshold
+        );
+
+        if (allReady) {
+            // If everyone is ready, immediately read the next chunk.
+            readSlice();
+        }
+        // If not all are ready, we STOP and wait for onbufferedamountlow to fire.
       }
 
       reader.onload = (e) => {
+        isReading = false;
         sendChunk(e.target.result);
       };
 
       reader.onerror = (err) => {
+        isReading = false;
         console.error("FileReader error:", err);
         reject(err);
       };
 
       receivers.forEach(({ dataChannel }) => {
         dataChannel.onbufferedamountlow = () => {
-          if (offset < file.size) {
+          // ✅ KEY FIX: When ANY channel's buffer gets low, re-check if ALL are now ready.
+          const allReady = [...receivers.values()].every(
+            r => r.dataChannel.bufferedAmount < r.dataChannel.bufferedAmountLowThreshold
+          );
+          if (allReady) {
             readSlice();
           }
         };
       });
 
-      readSlice();
+      readSlice(); // Start the process
     });
   }
 
