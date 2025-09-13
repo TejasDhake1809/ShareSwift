@@ -13,18 +13,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const filesList = document.getElementById('files-list');
   const selectedFilesList = document.getElementById('selected-files-list');
 
-  const receivers = new Map(); 
+  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
   let filesQueue = [];
   let totalSentFiles = 0;
   let totalSentBytes = 0;
   let isSending = false;
-
-  const startTimeMap = new Map();
-
-  // Sliding window params
-  const CHUNK_SIZE = 512 * 1024;
-  const WINDOW_SIZE = 64;
-  const RETRANSMIT_TIMEOUT = 2000; // ms
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -40,32 +33,33 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   socket.on('init', async ({ receiverSocketId }) => {
-    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
+    // ✅ Fetch Twilio ICE servers from backend
+    const iceServers = await fetch("/ice-servers")
+      .then(res => res.json())
+      .catch(err => {
+        console.error("Failed to fetch ICE servers:", err);
+        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+      });
+
     const pc = new RTCPeerConnection({ iceServers });
+
     const dataChannel = pc.createDataChannel("files", { ordered: true, reliable: true });
     dataChannel.binaryType = "arraybuffer";
 
-    receivers.set(receiverSocketId, { pc, dataChannel, lastAckedSeq: -1, pending: new Map() });
+    const queue = [];
+    receivers.set(receiverSocketId, { pc, dataChannel, queue });
 
     dataChannel.onopen = () => {
       showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
+      // send queued messages
+      while (queue.length) dataChannel.send(queue.shift());
     };
 
-    dataChannel.onmessage = e => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "ack") {
-          const conn = receivers.get(receiverSocketId);
-          if (conn) {
-            conn.lastAckedSeq = Math.max(conn.lastAckedSeq, msg.seq);
-            // cleanup old pending chunks
-            for (let [s] of conn.pending) {
-              if (s <= conn.lastAckedSeq) conn.pending.delete(s);
-            }
-          }
-        }
-      } catch {}
-    };
+    dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
+
+    // DEBUG: ICE / connection state
+    pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
 
     pc.onicecandidate = event => {
       if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
@@ -92,8 +86,10 @@ document.addEventListener('DOMContentLoaded', () => {
   socket.on('receiver-disconnect', ({ receiverId }) => {
     const conn = receivers.get(receiverId);
     if (!conn) return;
+
     if (conn.dataChannel) conn.dataChannel.close();
     if (conn.pc) conn.pc.close();
+
     receivers.delete(receiverId);
     showToast(`Receiver ${receiverId} disconnected`, "error");
     peerStatus.textContent = `Connected peers: ${receivers.size}`;
@@ -143,62 +139,32 @@ document.addEventListener('DOMContentLoaded', () => {
       row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
       filesList.appendChild(row);
 
-      receivers.forEach(({ dataChannel }) => {
+      receivers.forEach(({ dataChannel, queue }) => {
         const header = JSON.stringify({ type: "header", meta });
         if (dataChannel.readyState === 'open') dataChannel.send(header);
+        else queue.push(header);
       });
 
-      let seq = 0;
+      const chunkSize = 16384;
       let offset = 0;
-      startTimeMap.set(file.name, performance.now());
-
-      function scheduleRetransmit(conn, seqNum, payload) {
-        conn.pending.set(seqNum, { payload, ts: Date.now() });
-      }
-
-      function checkRetransmits() {
-        receivers.forEach(conn => {
-          for (let [s, { payload, ts }] of conn.pending) {
-            if (Date.now() - ts > RETRANSMIT_TIMEOUT) {
-              if (conn.dataChannel.readyState === "open") {
-                conn.dataChannel.send(payload);
-                conn.pending.set(s, { payload, ts: Date.now() });
-              }
-            }
-          }
-        });
-        setTimeout(checkRetransmits, 500);
-      }
-      checkRetransmits();
-
       const reader = new FileReader();
+
       reader.onload = e => {
-        const chunk = e.target.result;
-        receivers.forEach(conn => {
-          const inFlight = seq - conn.lastAckedSeq;
-          if (inFlight <= WINDOW_SIZE && conn.dataChannel.readyState === "open") {
-            const packet = JSON.stringify({ type: "chunk", seq, data: Array.from(new Uint8Array(chunk)) });
-            conn.dataChannel.send(packet);
-            scheduleRetransmit(conn, seq, packet);
-          }
+        receivers.forEach(({ dataChannel, queue }) => {
+          if (dataChannel.readyState === 'open') dataChannel.send(e.target.result);
+          else queue.push(e.target.result);
         });
-        seq++;
-        offset += chunk.byteLength;
+
+        offset += e.target.result.byteLength;
         row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
 
         if (offset < file.size) readSlice(offset);
         else {
-          receivers.forEach(({ dataChannel }) => {
-            if (dataChannel.readyState === 'open') {
-              dataChannel.send(JSON.stringify({ type: 'done' }));
-            }
+          receivers.forEach(({ dataChannel, queue }) => {
+            const done = JSON.stringify({ type: 'done' });
+            if (dataChannel.readyState === 'open') dataChannel.send(done);
+            else queue.push(done);
           });
-
-          const endTime = performance.now();
-          const duration = (endTime - startTimeMap.get(file.name)) / 1000;
-          const speed = (file.size / 1024 / 1024 / duration).toFixed(2);
-          console.log(`File ${file.name} sent in ${duration.toFixed(2)}s | Speed: ${speed} MB/s`);
-
           totalSentFiles++;
           totalSentBytes += file.size;
           sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
@@ -207,7 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       function readSlice(o) {
-        reader.readAsArrayBuffer(file.slice(o, o + CHUNK_SIZE));
+        reader.readAsArrayBuffer(file.slice(o, o + chunkSize));
       }
       readSlice(0);
     });

@@ -17,13 +17,6 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
 
-  const startTimeMap = new Map();
-  const receivedChunks = new Map();
-
-  const ACK_EVERY_N = 16;
-  let highestSeq = -1;
-  let ackCounter = 0;
-
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
@@ -47,13 +40,22 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
+    // ✅ Fetch Twilio ICE servers dynamically
+    const iceServers = await fetch("/ice-servers")
+      .then(res => res.json())
+      .catch(err => {
+        console.error("Failed to fetch ICE servers:", err);
+        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+      });
 
     pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = e => {
       if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
+
+    pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
 
     pc.ondatachannel = e => {
       dataChannel = e.channel;
@@ -76,7 +78,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('ice-candidate', async ({ candidate }) => {
     if (!pc || !candidate) return;
-    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn(err); }
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn(err);
+    }
   });
 
   function handleDataMessage(e) {
@@ -84,16 +90,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'header') startNextFile(msg.meta);
       else if (msg.type === 'done') finishCurrentFile();
-      else if (msg.type === 'chunk') {
-        const { seq, data } = msg;
-        receivedChunks.set(seq, new Uint8Array(data));
-        highestSeq = Math.max(highestSeq, seq);
-        ackCounter++;
-        if (ackCounter >= ACK_EVERY_N && dataChannel.readyState === "open") {
-          dataChannel.send(JSON.stringify({ type: "ack", seq: highestSeq }));
-          ackCounter = 0;
-        }
-      }
+    } else {
+      if (!currentFile) return;
+      currentFile.buffer.push(e.data);
+      currentFile.received += e.data.byteLength;
+      updateProgress();
+      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
   }
 
@@ -104,59 +106,66 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedFiles.appendChild(row);
 
     const fileObj = { meta, buffer: [], received: 0, row };
-    currentFile = fileObj;
-    startTimeMap.set(meta.filename, performance.now());
+    if (!currentFile) currentFile = fileObj;
+    else fileQueue.push(fileObj);
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
+  function updateProgress() {
+    if (!currentFile || !currentFile.row) return;
+    currentFile.row.querySelector('.progress-bar-fill').style.width =
+      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
+  }
+
   function finishCurrentFile() {
     if (!currentFile) return;
-    const ordered = [];
-    for (let i = 0; i <= highestSeq; i++) {
-      if (receivedChunks.has(i)) ordered.push(receivedChunks.get(i));
-    }
-    const blob = new Blob(ordered, { type: "application/octet-stream" });
+
+    // ✅ Force binary download instead of inline open
+    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
-    document.body.appendChild(a);
+    document.body.appendChild(a); // needed for iOS
     a.click();
     document.body.removeChild(a);
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
-    const endTime = performance.now();
-    const duration = (endTime - startTimeMap.get(currentFile.meta.filename)) / 1000;
-    const avgSpeed = (currentFile.meta.size / 1024 / 1024 / duration).toFixed(2);
-    console.log(`File ${currentFile.meta.filename} received in ${duration.toFixed(2)}s | Avg Speed: ${avgSpeed} MB/s`);
-
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
+    showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    receivedChunks.clear();
-    highestSeq = -1;
-    currentFile = null;
+    currentFile = fileQueue.shift() || null;
   }
+
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent)
+      .then(() => showToast('Room ID copied!', 'success'))
+      .catch(() => showToast('Failed to copy', 'error'));
+  });
 
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
+
     socket.emit('receiver-disconnect');
+
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
+
     showToast("Disconnected from room", "info");
+
     dataChannel = null;
     pc = null;
     currentFile = null;
+    fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
-    startTimeMap.clear();
-    receivedChunks.clear();
-    highestSeq = -1;
   });
 });
