@@ -1,3 +1,5 @@
+// receiver.js (Updated with StreamSaver.js)
+
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
 
@@ -13,7 +15,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let pc = null;
   let dataChannel = null;
-  let fileQueue = [];
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
 
@@ -40,12 +41,11 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    // ✅ Fetch Twilio ICE servers dynamically
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       });
 
     pc = new RTCPeerConnection({ iceServers });
@@ -60,13 +60,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
-
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", "success");
       };
-
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -86,17 +84,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function handleDataMessage(e) {
+    // String data is for metadata (header, done)
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'header') startNextFile(msg.meta);
-      else if (msg.type === 'done') finishCurrentFile();
-    } else {
-      if (!currentFile) return;
-      currentFile.buffer.push(e.data);
-      currentFile.received += e.data.byteLength;
-      updateProgress();
-      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
+      if (msg.type === 'header') {
+        startNextFile(msg.meta);
+      } else if (msg.type === 'done') {
+        finishCurrentFile();
+      }
+      return;
     }
+
+    // Binary data is a file chunk
+    if (!currentFile || !currentFile.writer) return;
+
+    // ✅ KEY CHANGE: Write the chunk directly to the file stream
+    currentFile.writer.write(new Uint8Array(e.data));
+
+    currentFile.received += e.data.byteLength;
+    updateProgress();
   }
 
   function startNextFile(meta) {
@@ -105,30 +111,32 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    const fileObj = { meta, buffer: [], received: 0, row };
-    if (!currentFile) currentFile = fileObj;
-    else fileQueue.push(fileObj);
+    // ✅ KEY CHANGE: Create a writable stream using StreamSaver.js
+    const fileStream = streamSaver.createWriteStream(meta.filename, {
+      size: meta.size
+    });
+
+    currentFile = {
+      meta,
+      received: 0,
+      row,
+      writer: fileStream.getWriter() // Get the writer to push data to the file
+    };
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    currentFile.row.querySelector('.progress-bar-fill').style.width =
-      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
+    const progress = Math.floor((currentFile.received / currentFile.meta.size) * 100);
+    currentFile.row.querySelector('.progress-bar-fill').style.width = `${progress}%`;
   }
 
   function finishCurrentFile() {
-    if (!currentFile) return;
+    if (!currentFile || !currentFile.writer) return;
 
-    // ✅ Force binary download instead of inline open
-    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = currentFile.meta.filename;
-    document.body.appendChild(a); // needed for iOS
-    a.click();
-    document.body.removeChild(a);
+    // ✅ KEY CHANGE: Close the writer to finalize the file download
+    currentFile.writer.close();
 
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     totalFiles++;
@@ -136,35 +144,27 @@ document.addEventListener('DOMContentLoaded', () => {
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    currentFile = fileQueue.shift() || null;
+    currentFile = null; // Ready for the next file
   }
 
-  roomDisplay.addEventListener('click', () => {
-    if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast('Room ID copied!', 'success'))
-      .catch(() => showToast('Failed to copy', 'error'));
-  });
-
+  // ... (keep the rest of the event listeners like disconnectBtn, etc., they are unchanged)
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
-
+    if (currentFile && currentFile.writer) {
+        currentFile.writer.abort(); // Abort the stream if disconnected mid-file
+    }
     socket.emit('receiver-disconnect');
-
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
-
     showToast("Disconnected from room", "info");
-
     dataChannel = null;
     pc = null;
     currentFile = null;
-    fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
   });
