@@ -16,6 +16,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let fileQueue = [];
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
+  
+  // NEW: Define how often to send an ACK (in number of chunks)
+  const ACK_BATCH_SIZE = 16;
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -40,12 +43,11 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
-    // ✅ Fetch Twilio ICE servers dynamically
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       });
 
     pc = new RTCPeerConnection({ iceServers });
@@ -54,19 +56,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
     };
 
-    pc.oniceconnectionstatechange = () => console.log('ICE state:', pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log('Connection state:', pc.connectionState);
-
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
-
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", "success");
       };
-
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -94,6 +91,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!currentFile) return;
       currentFile.buffer.push(e.data);
       currentFile.received += e.data.byteLength;
+      
+      // NEW: Increment chunk counter and send ACK if batch is complete
+      currentFile.chunksReceived++;
+      if (currentFile.chunksReceived % ACK_BATCH_SIZE === 0 || currentFile.received >= currentFile.meta.size) {
+        if (dataChannel.readyState === 'open') {
+          dataChannel.send(JSON.stringify({ type: 'ack' }));
+        }
+      }
+
       updateProgress();
       if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
@@ -105,7 +111,8 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    const fileObj = { meta, buffer: [], received: 0, row };
+    // MODIFIED: Added chunksReceived to track for ACKs
+    const fileObj = { meta, buffer: [], received: 0, chunksReceived: 0, row };
     if (!currentFile) currentFile = fileObj;
     else fileQueue.push(fileObj);
 
@@ -121,12 +128,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function finishCurrentFile() {
     if (!currentFile) return;
 
-    // ✅ Force binary download instead of inline open
     const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = currentFile.meta.filename;
-    document.body.appendChild(a); // needed for iOS
+    document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 
@@ -139,28 +145,17 @@ document.addEventListener('DOMContentLoaded', () => {
     currentFile = fileQueue.shift() || null;
   }
 
-  roomDisplay.addEventListener('click', () => {
-    if (!roomDisplay.textContent) return;
-    navigator.clipboard.writeText(roomDisplay.textContent)
-      .then(() => showToast('Room ID copied!', 'success'))
-      .catch(() => showToast('Failed to copy', 'error'));
-  });
-
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
-
     socket.emit('receiver-disconnect');
-
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
-
     showToast("Disconnected from room", "info");
-
     dataChannel = null;
     pc = null;
     currentFile = null;
