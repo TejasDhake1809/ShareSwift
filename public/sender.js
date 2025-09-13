@@ -1,192 +1,210 @@
-// sender.js (Modified to work reliably with your receiver)
-
 document.addEventListener('DOMContentLoaded', () => {
-    const socket = io({ transports: ['websocket'] });
+  const socket = io({ transports: ['websocket'] });
 
-    const createRoomBtn = document.getElementById('create-room-btn');
-    const sharePanel = document.getElementById('share-panel');
-    const roomDisplay = document.getElementById('room-display-persistent');
-    const peerStatus = document.getElementById('peer-status');
-    const fileMetrics = document.getElementById('file-metrics');
-    const sentMetrics = document.getElementById('sent-metrics');
-    const fileInput = document.getElementById('file-input');
-    const sendBtn = document.getElementById('send-btn');
-    const cancelBtn = document.getElementById('cancel-btn');
-    const filesList = document.getElementById('files-list');
-    const selectedFilesList = document.getElementById('selected-files-list');
+  const createRoomBtn = document.getElementById('create-room-btn');
+  const sharePanel = document.getElementById('share-panel');
+  const roomDisplay = document.getElementById('room-display-persistent');
+  const peerStatus = document.getElementById('peer-status');
+  const fileMetrics = document.getElementById('file-metrics');
+  const sentMetrics = document.getElementById('sent-metrics');
+  const fileInput = document.getElementById('file-input');
+  const sendBtn = document.getElementById('send-btn');
+  const cancelBtn = document.getElementById('cancel-btn');
+  const filesList = document.getElementById('files-list');
+  const selectedFilesList = document.getElementById('selected-files-list');
 
-    const receivers = new Map();
-    let filesQueue = [];
-    let totalSentFiles = 0;
-    let totalSentBytes = 0;
-    let isSending = false;
+  const receivers = new Map(); // receiverId -> { pc, dataChannel, queue: [] }
+  let filesQueue = [];
+  let totalSentFiles = 0;
+  let totalSentBytes = 0;
+  let isSending = false;
 
-    const CHUNK_SIZE = 256 * 1024; // 256KB
+  // Constants for file transfer
+  const CHUNK_SIZE = 64 * 1024; // 64 KB chunk size
+  const HIGH_WATER_MARK = 16 * 1024 * 1024; // Pause sending if buffer is > 16MB
 
-    function showToast(msg, type = "info") {
-        const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
-        Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
+  function showToast(msg, type = "info") {
+    const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
+    Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
+  }
+
+  createRoomBtn.addEventListener('click', () => socket.emit('create-room'));
+
+  socket.on('room-created', ({ roomId }) => {
+    roomDisplay.textContent = roomId;
+    sharePanel.classList.remove('hidden');
+    showToast(`Room ${roomId} created`, "success");
+  });
+
+  socket.on('init', async ({ receiverSocketId }) => {
+    const iceServers = await fetch("/ice-servers")
+      .then(res => res.json())
+      .catch(err => {
+        console.error("Failed to fetch ICE servers:", err);
+        return [{ urls: "stun:stun.l.google.com:19302" }];
+      });
+
+    const pc = new RTCPeerConnection({ iceServers });
+    const dataChannel = pc.createDataChannel("files", { ordered: true });
+    dataChannel.binaryType = "arraybuffer";
+    
+    // Set the buffer threshold. When it drops below this, 'bufferedamountlow' fires.
+    dataChannel.bufferedAmountLowThreshold = CHUNK_SIZE * 4;
+
+    const queue = [];
+    receivers.set(receiverSocketId, { pc, dataChannel, queue });
+
+    dataChannel.onopen = () => {
+      showToast(`Data channel open for receiver ${receiverSocketId}`, "success");
+      while (queue.length) dataChannel.send(queue.shift());
+    };
+
+    dataChannel.onmessage = e => console.log(`Received from ${receiverSocketId}:`, e.data);
+    pc.oniceconnectionstatechange = () => console.log(`ICE state for ${receiverSocketId}:`, pc.iceConnectionState);
+    pc.onconnectionstatechange = () => console.log(`Connection state for ${receiverSocketId}:`, pc.connectionState);
+
+    pc.onicecandidate = event => {
+      if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
+  });
+
+  socket.on('answer', async ({ from, answer }) => {
+    const conn = receivers.get(from);
+    if (!conn) return;
+    await conn.pc.setRemoteDescription(answer);
+    showToast(`Receiver ${from} connected`, "success");
+  });
+
+  socket.on('ice-candidate', async ({ candidate, from }) => {
+    const conn = receivers.get(from);
+    if (!conn || !candidate) return;
+    await conn.pc.addIceCandidate(candidate).catch(err => console.warn(err));
+  });
+
+  socket.on('receiver-disconnect', ({ receiverId }) => {
+    const conn = receivers.get(receiverId);
+    if (!conn) return;
+
+    if (conn.dataChannel) conn.dataChannel.close();
+    if (conn.pc) conn.pc.close();
+
+    receivers.delete(receiverId);
+    showToast(`Receiver ${receiverId} disconnected`, "error");
+    peerStatus.textContent = `Connected peers: ${receivers.size}`;
+  });
+
+  socket.on('update-receivers', ({ count }) => {
+    peerStatus.textContent = `Connected peers: ${count}`;
+  });
+
+  fileInput.addEventListener('change', () => {
+    const selectedFiles = Array.from(fileInput.files);
+    filesQueue.push(...selectedFiles);
+    const totalSize = filesQueue.reduce((acc, f) => acc + f.size, 0);
+    fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize.toLocaleString()} B`;
+    sendBtn.disabled = filesQueue.length === 0;
+    cancelBtn.disabled = filesQueue.length === 0;
+
+    selectedFilesList.innerHTML = '';
+    filesQueue.forEach(f => {
+      const div = document.createElement('div');
+      div.className = 'selected-file';
+      div.textContent = f.name;
+      selectedFilesList.appendChild(div);
+    });
+    fileInput.value = '';
+    showToast(`${selectedFiles.length} file(s) added to queue`);
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    if (!receivers.size || !filesQueue.length || isSending) return;
+    isSending = true;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    while (filesQueue.length) await sendFile(filesQueue.shift());
+    isSending = false;
+    selectedFilesList.innerHTML = '';
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    showToast("All files sent!", "success");
+  });
+
+  /**
+   * =================================================================
+   * ✅ REPLACED FUNCTION TO HANDLE LARGE FILES WITH BACKPRESSURE
+   * =================================================================
+   */
+  async function sendFile(file) {
+    const meta = { filename: file.name, size: file.size, type: file.type };
+    const row = document.createElement('div');
+    row.className = 'file-entry';
+    row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
+    filesList.appendChild(row);
+
+    const progressBarFill = row.querySelector('.progress-bar-fill');
+
+    // 1. Send file header to all peers
+    const header = JSON.stringify({ type: "header", meta });
+    receivers.forEach(({ dataChannel, queue }) => {
+      if (dataChannel.readyState === 'open') dataChannel.send(header);
+      else queue.push(header);
+    });
+
+    let offset = 0;
+    // 2. Read and send file in chunks using a while loop
+    while (offset < file.size) {
+      // Wait for the slowest peer's buffer to drain before sending more data
+      for (const { dataChannel } of receivers.values()) {
+        if (dataChannel.bufferedAmount > HIGH_WATER_MARK) {
+          await new Promise(resolve => {
+            // The 'bufferedamountlow' event fires when the buffer drops below the threshold
+            dataChannel.onbufferedamountlow = resolve;
+          });
+        }
+      }
+
+      const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
+      const chunkBuffer = await chunkSlice.arrayBuffer();
+
+      // Send the binary chunk to all peers
+      receivers.forEach(({ dataChannel }) => {
+        // We don't queue binary chunks to avoid high memory usage
+        if (dataChannel.readyState === 'open') {
+          dataChannel.send(chunkBuffer);
+        }
+      });
+
+      offset += chunkBuffer.byteLength;
+      progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
     }
 
-    createRoomBtn.addEventListener('click', () => socket.emit('create-room'));
-
-    socket.on('room-created', ({ roomId }) => {
-        roomDisplay.textContent = roomId;
-        sharePanel.classList.remove('hidden');
-    });
-
-    socket.on('init', async ({ receiverSocketId }) => {
-        const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(err => [{ urls: "stun:stun.l.google.com:19302" }]);
-        const pc = new RTCPeerConnection({ iceServers });
-        const dataChannel = pc.createDataChannel("files", { ordered: true });
-        dataChannel.binaryType = "arraybuffer";
-        
-        const BUFFER_THRESHOLD = CHUNK_SIZE * 4; // 1MB
-        dataChannel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
-        
-        receivers.set(receiverSocketId, { pc, dataChannel });
-        
-        pc.onicecandidate = event => {
-            if (event.candidate) socket.emit('ice-candidate', { to: receiverSocketId, candidate: event.candidate });
-        };
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('offer', { to: receiverSocketId, offer: pc.localDescription });
+    // 3. Send 'done' message to all peers
+    const doneMsg = JSON.stringify({ type: 'done' });
+    receivers.forEach(({ dataChannel, queue }) => {
+      if (dataChannel.readyState === 'open') dataChannel.send(doneMsg);
+      else queue.push(doneMsg);
     });
     
-    socket.on('answer', async ({ from, answer }) => {
-        const conn = receivers.get(from);
-        if (conn) await conn.pc.setRemoteDescription(answer);
-    });
+    totalSentFiles++;
+    totalSentBytes += file.size;
+    sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes.toLocaleString()}`;
+  }
 
-    socket.on('ice-candidate', async ({ candidate, from }) => {
-        const conn = receivers.get(from);
-        if (conn) await conn.pc.addIceCandidate(candidate).catch(console.warn);
-    });
 
-    socket.on('receiver-disconnect', ({ receiverId }) => {
-        const conn = receivers.get(receiverId);
-        if (conn) {
-            conn.dataChannel?.close();
-            conn.pc?.close();
-            receivers.delete(receiverId);
-            peerStatus.textContent = `Connected peers: ${receivers.size}`;
-        }
-    });
+  cancelBtn.addEventListener('click', () => {
+    filesQueue = [];
+    selectedFilesList.innerHTML = '';
+    fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    showToast("File selection canceled", "error");
+  });
 
-    socket.on('update-receivers', ({ count }) => {
-        peerStatus.textContent = `Connected peers: ${count}`;
-    });
-
-    fileInput.addEventListener('change', () => {
-        const selectedFiles = Array.from(fileInput.files);
-        filesQueue.push(...selectedFiles);
-        const totalSize = filesQueue.reduce((acc, f) => acc + f.size, 0);
-        fileMetrics.textContent = `Files Selected: ${filesQueue.length} | Total Size: ${totalSize} B`;
-        sendBtn.disabled = filesQueue.length === 0;
-        cancelBtn.disabled = filesQueue.length === 0;
-        selectedFilesList.innerHTML = '';
-        filesQueue.forEach(f => {
-            const div = document.createElement('div');
-            div.className = 'selected-file';
-            div.textContent = f.name;
-            selectedFilesList.appendChild(div);
-        });
-        fileInput.value = '';
-    });
-
-    sendBtn.addEventListener('click', async () => {
-        if (!receivers.size || !filesQueue.length || isSending) return;
-        isSending = true;
-        sendBtn.disabled = true;
-        while (filesQueue.length) {
-            await sendFile(filesQueue.shift());
-        }
-        isSending = false;
-        selectedFilesList.innerHTML = '';
-        fileMetrics.textContent = `Files Selected: 0 | Total Size: 0 B`;
-        cancelBtn.disabled = true;
-        showToast("All files sent!", "success");
-    });
-
-    function sendFile(file) {
-        return new Promise((resolve, reject) => {
-            let offset = 0;
-            const meta = { filename: file.name, size: file.size, type: file.type };
-            const row = document.createElement('div');
-            row.className = 'file-entry';
-            row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
-            filesList.appendChild(row);
-            const progressBarFill = row.querySelector('.progress-bar-fill');
-
-            receivers.forEach(({ dataChannel }) => {
-                if (dataChannel.readyState === 'open') {
-                    dataChannel.send(JSON.stringify({ type: "header", meta }));
-                }
-            });
-
-            const reader = new FileReader();
-
-            reader.onload = (e) => {
-                receivers.forEach(({ dataChannel }) => {
-                    if (dataChannel.readyState === 'open') {
-                        try {
-                            dataChannel.send(e.target.result);
-                        } catch (err) {
-                            console.error("Send failed:", err);
-                            return reject(err);
-                        }
-                    }
-                });
-
-                offset += e.target.result.byteLength;
-                progressBarFill.style.width = `${Math.floor((offset / file.size) * 100)}%`;
-
-                if (offset < file.size) {
-                    // ✅ CRITICAL FIX: Check if ALL receivers are ready, not just the first one.
-                    const allReady = [...receivers.values()].every(
-                        conn => conn.dataChannel.readyState === 'open' && conn.dataChannel.bufferedAmount < conn.dataChannel.bufferedAmountLowThreshold
-                    );
-                    if (allReady) {
-                        readNextChunk();
-                    }
-                    // If not all are ready, we wait for the slowest peer's 'onbufferedamountlow' to fire.
-                } else {
-                    receivers.forEach(({ dataChannel }) => {
-                        if (dataChannel.readyState === 'open') {
-                            dataChannel.send(JSON.stringify({ type: 'done' }));
-                        }
-                    });
-                    totalSentFiles++;
-                    totalSentBytes += file.size;
-                    sentMetrics.textContent = `Files Sent: ${totalSentFiles} | Total Bytes: ${totalSentBytes}`;
-                    resolve();
-                }
-            };
-
-            reader.onerror = (err) => reject(err);
-
-            const readNextChunk = () => {
-                const slice = file.slice(offset, offset + CHUNK_SIZE);
-                reader.readAsArrayBuffer(slice);
-            };
-
-            receivers.forEach(({ dataChannel }) => {
-                dataChannel.onbufferedamountlow = () => {
-                    // ✅ CRITICAL FIX: When any buffer drains, re-check if ALL are ready before proceeding.
-                    const allReady = [...receivers.values()].every(
-                        conn => conn.dataChannel.readyState === 'open' && conn.dataChannel.bufferedAmount < conn.dataChannel.bufferedAmountLowThreshold
-                    );
-                    if (allReady && offset < file.size) {
-                        readNextChunk();
-                    }
-                };
-            });
-            
-            readNextChunk();
-        });
-    }
-    
-    cancelBtn.addEventListener('click', () => { /* ... cancel logic ... */ });
-    roomDisplay.addEventListener('click', () => { /* ... copy logic ... */ });
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent).then(() => showToast("Room ID copied!", "success"));
+  });
 });

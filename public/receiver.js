@@ -1,9 +1,5 @@
-// receiver.js (with Fallback for iOS/Safari)
-
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
-
-  streamSaver.mitm = './mitm.html';
 
   const joinInput = document.getElementById('join-room-input');
   const joinBtn = document.getElementById('join-room-btn');
@@ -17,17 +13,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let pc = null;
   let dataChannel = null;
+  let fileQueue = [];
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
-
-  // ✅ NEW: Add a check to see if StreamSaver is supported.
-  // Safari on iOS will return false.
-  const isStreamSaverSupported = 'serviceWorker' in navigator && !!window.WritableStream;
-
-  if (!isStreamSaverSupported) {
-    console.warn("StreamSaver is not supported. Falling back to memory buffering. This may fail for very large files.");
-    showToast("Warning: Your browser may struggle with large files.", "error");
-  }
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -52,11 +40,12 @@ document.addEventListener('DOMContentLoaded', () => {
     joinStatus.textContent = 'Connected';
     showToast(`Connected to room ${roomId}`, 'success');
 
+    // ✅ Fetch Twilio ICE servers dynamically
     const iceServers = await fetch("/ice-servers")
       .then(res => res.json())
       .catch(err => {
         console.error("Failed to fetch ICE servers:", err);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
+        return [{ urls: "stun:stun.l.google.com:19302" }]; // fallback
       });
 
     pc = new RTCPeerConnection({ iceServers });
@@ -71,11 +60,13 @@ document.addEventListener('DOMContentLoaded', () => {
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
+
       dataChannel.onopen = () => {
         receivePanel.classList.remove('hidden');
         joinPanel.classList.add('hidden');
         showToast("Ready to receive files!", "success");
       };
+
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -97,25 +88,15 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-      if (msg.type === 'header') {
-        startNextFile(msg.meta);
-      } else if (msg.type === 'done') {
-        finishCurrentFile();
-      }
-      return;
-    }
-
-    if (!currentFile) return;
-
-    // ✅ MODIFIED: Check which method to use for handling the data chunk
-    if (isStreamSaverSupported) {
-      currentFile.writer.write(new Uint8Array(e.data));
+      if (msg.type === 'header') startNextFile(msg.meta);
+      else if (msg.type === 'done') finishCurrentFile();
     } else {
+      if (!currentFile) return;
       currentFile.buffer.push(e.data);
+      currentFile.received += e.data.byteLength;
+      updateProgress();
+      if (currentFile.received >= currentFile.meta.size) finishCurrentFile();
     }
-
-    currentFile.received += e.data.byteLength;
-    updateProgress();
   }
 
   function startNextFile(meta) {
@@ -124,74 +105,66 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    currentFile = {
-      meta,
-      received: 0,
-      row,
-    };
-
-    // ✅ MODIFIED: Check which method to use for starting the file save
-    if (isStreamSaverSupported) {
-      const fileStream = streamSaver.createWriteStream(meta.filename, { size: meta.size });
-      currentFile.writer = fileStream.getWriter();
-    } else {
-      currentFile.buffer = [];
-    }
+    const fileObj = { meta, buffer: [], received: 0, row };
+    if (!currentFile) currentFile = fileObj;
+    else fileQueue.push(fileObj);
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
 
   function updateProgress() {
     if (!currentFile || !currentFile.row) return;
-    const progress = Math.floor((currentFile.received / currentFile.meta.size) * 100);
-    currentFile.row.querySelector('.progress-bar-fill').style.width = `${progress}%`;
+    currentFile.row.querySelector('.progress-bar-fill').style.width =
+      `${Math.floor((currentFile.received / currentFile.meta.size) * 100)}%`;
   }
 
   function finishCurrentFile() {
     if (!currentFile) return;
 
-    // ✅ MODIFIED: Check which method to use for finalizing the file
-    if (isStreamSaverSupported) {
-      if (currentFile.writer) currentFile.writer.close();
-    } else {
-      const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = currentFile.meta.filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    }
-    
+    // ✅ Force binary download instead of inline open
+    const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = currentFile.meta.filename;
+    document.body.appendChild(a); // needed for iOS
+    a.click();
+    document.body.removeChild(a);
+
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    currentFile = null;
+    currentFile = fileQueue.shift() || null;
   }
-  
+
+  roomDisplay.addEventListener('click', () => {
+    if (!roomDisplay.textContent) return;
+    navigator.clipboard.writeText(roomDisplay.textContent)
+      .then(() => showToast('Room ID copied!', 'success'))
+      .catch(() => showToast('Failed to copy', 'error'));
+  });
+
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
 
-    // ✅ MODIFIED: Abort the stream if disconnected mid-file
-    if (currentFile && isStreamSaverSupported && currentFile.writer) {
-        currentFile.writer.abort();
-    }
-
     socket.emit('receiver-disconnect');
+
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
     joinStatus.textContent = '';
     receivedFiles.innerHTML = '';
     receivedMetrics.textContent = `Files received: 0 | Total bytes: 0`;
     roomDisplay.textContent = '';
+
     showToast("Disconnected from room", "info");
+
     dataChannel = null;
     pc = null;
     currentFile = null;
+    fileQueue = [];
     totalFiles = 0;
     totalBytes = 0;
   });
