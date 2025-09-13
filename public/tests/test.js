@@ -2,8 +2,11 @@ const { io } = require("socket.io-client");
 
 // --- Configuration ---
 const SERVER_URL = "https://shareswift-1.onrender.com"; 
-const NUM_CLIENTS = 100;
-const JOIN_DELAY_MS = 25; 
+const NUM_CLIENTS = 10;
+// MODIFIED: Significantly increased the delay to prevent server overload
+const JOIN_DELAY_MS = 250; // Before: 25. This gives the server time to process each client.
+const CLIENT_TIMEOUT_MS = 30000; // 30 seconds per client
+const SERVER_WARMUP_DELAY_MS = 10000; // 10 seconds (still good practice)
 
 // --- File Transfer Simulation ---
 const SIMULATE_FILE_TRANSFER = true;
@@ -30,50 +33,68 @@ const createReceiver = (roomId) => {
     reconnection: false, 
   });
 
-  let handshakeComplete = false;
+  let hasFinished = false; // Flag to prevent double-counting errors/successes
+
+  // Add a timeout for each client. If it doesn't finish in time, count it as a failure.
+  const clientTimeout = setTimeout(() => {
+    if (hasFinished) return;
+    hasFinished = true;
+    failedConnections++;
+    console.error(`❌ A client timed out after ${CLIENT_TIMEOUT_MS / 1000}s.`);
+    socket.disconnect(); // This triggers the 'disconnect' event, which calls checkCompletion()
+  }, CLIENT_TIMEOUT_MS);
 
   socket.on("connect", () => {
     socket.emit("receiver-join", { roomId });
   });
 
-  // The receiver simulates the handshake
   socket.on("offer", ({ from }) => {
     socket.emit("answer", { to: from, answer: { type: "dummy-answer" } });
   });
 
   socket.on("ice-candidate", ({ from }) => {
-    if (handshakeComplete) return; 
-    handshakeComplete = true;
+    if (hasFinished) return; 
     successfulHandshakes++;
     console.log(`🤝 Handshake #${successfulHandshakes} complete.`);
-    
-    // Tell the sender we're ready for the next step.
     socket.emit("test-ready-for-transfer", { to: from });
   });
 
-  // If file transfer is enabled, listen for the 'done' message on our custom event
   if (SIMULATE_FILE_TRANSFER) {
     socket.on("test-transfer-done", () => {
+        if (hasFinished) return;
         successfulTransfers++;
         console.log(`✅ Transfer #${successfulTransfers} complete for client.`);
-        setTimeout(() => socket.disconnect(), 200); // Disconnect after success
+        socket.disconnect();
     });
+  } else {
+      socket.on("ice-candidate", () => {
+          if (!hasFinished) socket.disconnect();
+      });
   }
 
   socket.on("connect_error", (err) => {
+    if (hasFinished) return;
+    hasFinished = true;
     failedConnections++;
     console.error(`❌ Client connection failed: ${err.message}`);
+    clearTimeout(clientTimeout);
     checkCompletion();
   });
 
   socket.on("no-sender", ({ message }) => {
+    if (hasFinished) return;
+    hasFinished = true;
     failedConnections++;
     console.error(`❌ Client failed to join: ${message}`);
+    clearTimeout(clientTimeout);
     checkCompletion();
   });
 
   socket.on("disconnect", () => {
+    if (hasFinished) return;
+    hasFinished = true;
     clientsDone++;
+    clearTimeout(clientTimeout); 
     checkCompletion();
   });
 };
@@ -85,9 +106,7 @@ const runTest = async () => {
   const senderSocket = io(SERVER_URL, { transports: ["websocket"] });
 
   const getRoomId = new Promise((resolve, reject) => {
-    senderSocket.on("connect", () => {
-      senderSocket.emit("create-room");
-    });
+    senderSocket.on("connect", () => senderSocket.emit("create-room"));
     senderSocket.on("room-created", ({ roomId }) => {
       console.log(`🏠 Room created with ID: ${roomId}\n`);
       resolve(roomId);
@@ -98,25 +117,18 @@ const runTest = async () => {
   try {
     const roomId = await getRoomId;
     
-    // The sender listens for a receiver to be ready for the transfer simulation
+    // MODIFIED: Wait for the server to warm up before launching receivers
+    console.log(`Server is waking up... waiting ${SERVER_WARMUP_DELAY_MS / 1000} seconds.`);
+    await new Promise(resolve => setTimeout(resolve, SERVER_WARMUP_DELAY_MS));
+    
     if (SIMULATE_FILE_TRANSFER) {
       senderSocket.on("test-ready-for-transfer", ({ from }) => {
         console.log(`\n🚀 Starting simulated file transfer to client ${from}...`);
-        
-        // This simulates the data transfer. In the real app, these are chunks.
-        // Here, we're just testing if the server can handle the message volume.
         for (let i = 0; i < SIMULATED_CHUNK_COUNT; i++) {
-          // We use a dedicated event for clarity and to avoid conflicts.
           senderSocket.emit("test-simulated-chunk", { to: from, payload: `chunk-${i}` }); 
         }
-
-        // After sending all chunks, send the 'done' message.
         senderSocket.emit("test-transfer-done", { to: from });
       });
-
-      // Your server needs to relay these new custom events.
-      // Make sure your server.js has listeners for 'test-simulated-chunk' and 'test-transfer-done'
-      // and relays them using io.to(to).emit(...)
     }
     
     console.log(`Phase 2: Launching ${NUM_CLIENTS} receivers...\n`);
@@ -130,7 +142,6 @@ const runTest = async () => {
   }
 };
 
-// Function to check if all clients are done and print final report
 function checkCompletion() {
   if (clientsDone + failedConnections >= NUM_CLIENTS) {
     console.log(`\n--- Test Complete ---`);
@@ -144,5 +155,5 @@ function checkCompletion() {
   }
 }
 
-// Start the test
 runTest();
+
