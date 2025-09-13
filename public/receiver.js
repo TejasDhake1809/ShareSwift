@@ -1,4 +1,4 @@
-// receiver.js (Updated with StreamSaver.js)
+// receiver.js (with Fallback for iOS/Safari)
 
 document.addEventListener('DOMContentLoaded', () => {
   const socket = io({ transports: ['websocket'] });
@@ -17,6 +17,15 @@ document.addEventListener('DOMContentLoaded', () => {
   let dataChannel = null;
   let currentFile = null;
   let totalFiles = 0, totalBytes = 0;
+
+  // ✅ NEW: Add a check to see if StreamSaver is supported.
+  // Safari on iOS will return false.
+  const isStreamSaverSupported = 'serviceWorker' in navigator && !!window.WritableStream;
+
+  if (!isStreamSaverSupported) {
+    console.warn("StreamSaver is not supported. Falling back to memory buffering. This may fail for very large files.");
+    showToast("Warning: Your browser may struggle with large files.", "error");
+  }
 
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
@@ -84,7 +93,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function handleDataMessage(e) {
-    // String data is for metadata (header, done)
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
       if (msg.type === 'header') {
@@ -95,11 +103,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Binary data is a file chunk
-    if (!currentFile || !currentFile.writer) return;
+    if (!currentFile) return;
 
-    // ✅ KEY CHANGE: Write the chunk directly to the file stream
-    currentFile.writer.write(new Uint8Array(e.data));
+    // ✅ MODIFIED: Check which method to use for handling the data chunk
+    if (isStreamSaverSupported) {
+      currentFile.writer.write(new Uint8Array(e.data));
+    } else {
+      currentFile.buffer.push(e.data);
+    }
 
     currentFile.received += e.data.byteLength;
     updateProgress();
@@ -111,17 +122,19 @@ document.addEventListener('DOMContentLoaded', () => {
     row.innerHTML = `<div class="fname">${meta.filename}</div><div class="progress-bar"><div class="progress-bar-fill"></div></div>`;
     receivedFiles.appendChild(row);
 
-    // ✅ KEY CHANGE: Create a writable stream using StreamSaver.js
-    const fileStream = streamSaver.createWriteStream(meta.filename, {
-      size: meta.size
-    });
-
     currentFile = {
       meta,
       received: 0,
       row,
-      writer: fileStream.getWriter() // Get the writer to push data to the file
     };
+
+    // ✅ MODIFIED: Check which method to use for starting the file save
+    if (isStreamSaverSupported) {
+      const fileStream = streamSaver.createWriteStream(meta.filename, { size: meta.size });
+      currentFile.writer = fileStream.getWriter();
+    } else {
+      currentFile.buffer = [];
+    }
 
     showToast(`Receiving file: ${meta.filename}`, 'info');
   }
@@ -133,27 +146,39 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function finishCurrentFile() {
-    if (!currentFile || !currentFile.writer) return;
+    if (!currentFile) return;
 
-    // ✅ KEY CHANGE: Close the writer to finalize the file download
-    currentFile.writer.close();
-
+    // ✅ MODIFIED: Check which method to use for finalizing the file
+    if (isStreamSaverSupported) {
+      if (currentFile.writer) currentFile.writer.close();
+    } else {
+      const blob = new Blob(currentFile.buffer, { type: "application/octet-stream" });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = currentFile.meta.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+    
     currentFile.row.querySelector('.progress-bar-fill').style.width = '100%';
     totalFiles++;
     totalBytes += currentFile.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
     showToast(`File received: ${currentFile.meta.filename}`, 'success');
 
-    currentFile = null; // Ready for the next file
+    currentFile = null;
   }
-
-  // ... (keep the rest of the event listeners like disconnectBtn, etc., they are unchanged)
+  
   disconnectBtn.addEventListener('click', () => {
     if (dataChannel) dataChannel.close();
     if (pc) pc.close();
-    if (currentFile && currentFile.writer) {
-        currentFile.writer.abort(); // Abort the stream if disconnected mid-file
+
+    // ✅ MODIFIED: Abort the stream if disconnected mid-file
+    if (currentFile && isStreamSaverSupported && currentFile.writer) {
+        currentFile.writer.abort();
     }
+
     socket.emit('receiver-disconnect');
     receivePanel.classList.add('hidden');
     joinPanel.classList.remove('hidden');
