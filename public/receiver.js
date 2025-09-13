@@ -11,17 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const receivedMetrics = document.getElementById('received-metrics');
   const disconnectBtn = document.getElementById('disconnect-btn');
 
-  let pc = null;
-  let dataChannel = null;
-  let totalFiles = 0, totalBytes = 0;
-
-  // Maps fileId -> file object {meta, buffer, received, row}
+  let pc = null, dataChannel = null, totalFiles = 0, totalBytes = 0;
   const filesInProgress = new Map();
+  const pendingChunks = new Map();
 
-  function log(msg) {
-    console.log(`[Receiver] ${msg}`);
-  }
-
+  function log(msg) { console.log(`[Receiver] ${msg}`); }
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
@@ -48,21 +42,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const iceServers = await fetch("/ice-servers").then(res => res.json()).catch(() => [{ urls: "stun:stun.l.google.com:19302" }]);
     pc = new RTCPeerConnection({ iceServers });
 
-    pc.onicecandidate = e => {
-      if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate });
-    };
+    pc.onicecandidate = e => { if (e.candidate) socket.emit('ice-candidate', { to: from, candidate: e.candidate }); };
 
     pc.ondatachannel = e => {
       dataChannel = e.channel;
       dataChannel.binaryType = 'arraybuffer';
-
-      dataChannel.onopen = () => {
-        receivePanel.classList.remove('hidden');
-        joinPanel.classList.add('hidden');
-        showToast("Ready to receive files!", "success");
-        log("Data channel open");
-      };
-
+      dataChannel.onopen = () => { receivePanel.classList.remove('hidden'); joinPanel.classList.add('hidden'); log("Data channel open"); };
       dataChannel.onmessage = handleDataMessage;
     };
 
@@ -81,13 +66,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleDataMessage(e) {
     if (typeof e.data === 'string') {
       const msg = JSON.parse(e.data);
-      log(`Received message type: ${msg.type}`);
+      log(`Received message type: ${msg.type} for fileId: ${msg.fileId || 'N/A'}`);
 
-      if (msg.type === 'header') {
-        startFile(msg.fileId, msg.meta);
-      } else if (msg.type === 'done') {
-        finishFile(msg.fileId);
-      }
+      if (msg.type === 'header') startFile(msg.fileId, msg.meta);
+      else if (msg.type === 'done') finishFile(msg.fileId);
     } else {
       const dataView = new DataView(e.data);
       const fileIdLength = dataView.getUint8(0);
@@ -97,7 +79,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (!filesInProgress.has(fileId)) {
         log(`Received chunk for unknown fileId ${fileId}, storing temporarily`);
-        // optional: store in temp buffer
+        if (!pendingChunks.has(fileId)) pendingChunks.set(fileId, []);
+        pendingChunks.get(fileId).push(chunk);
         return;
       }
 
@@ -117,6 +100,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const fileObj = { meta, buffer: [], received: 0, row };
     filesInProgress.set(fileId, fileObj);
     log(`Started file ${meta.filename} (ID: ${fileId})`);
+
+    if (pendingChunks.has(fileId)) {
+      pendingChunks.get(fileId).forEach(chunk => {
+        const tempEvent = { data: prependFileId(fileId, chunk) };
+        handleDataMessage(tempEvent);
+      });
+      pendingChunks.delete(fileId);
+      log(`Processed pending chunks for ${meta.filename}`);
+    }
+  }
+
+  function prependFileId(fileId, chunk) {
+    const encoder = new TextEncoder();
+    const idBytes = encoder.encode(fileId);
+    const buffer = new Uint8Array(1 + idBytes.length + chunk.byteLength);
+    buffer[0] = idBytes.length;
+    buffer.set(idBytes, 1);
+    buffer.set(new Uint8Array(chunk), 1 + idBytes.length);
+    return buffer.buffer;
   }
 
   function updateProgress(fileObj) {
@@ -128,7 +130,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function finishFile(fileId) {
     if (!filesInProgress.has(fileId)) return;
     const fileObj = filesInProgress.get(fileId);
-
     const blob = new Blob(fileObj.buffer, { type: "application/octet-stream" });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -138,14 +139,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.removeChild(a);
 
     fileObj.row.querySelector('.progress-bar-fill').style.width = '100%';
-
     totalFiles++;
     totalBytes += fileObj.meta.size;
     receivedMetrics.textContent = `Files received: ${totalFiles} | Total bytes: ${totalBytes}`;
-
     showToast(`File received: ${fileObj.meta.filename}`, 'success');
     log(`Finished file ${fileObj.meta.filename} (ID: ${fileId})`);
-
     filesInProgress.delete(fileId);
   }
 
@@ -171,6 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     dataChannel = null;
     pc = null;
     filesInProgress.clear();
+    pendingChunks.clear();
     totalFiles = 0;
     totalBytes = 0;
   });

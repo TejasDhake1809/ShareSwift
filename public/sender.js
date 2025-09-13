@@ -19,10 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let totalSentBytes = 0;
   let isSending = false;
 
-  function log(msg) {
-    console.log(`[Sender] ${msg}`);
-  }
-
+  function log(msg) { console.log(`[Sender] ${msg}`); }
   function showToast(msg, type = "info") {
     const bg = type === "error" ? "#e74c3c" : type === "success" ? "#2ecc71" : "#3498db";
     Toastify({ text: msg, duration: 2000, gravity: "top", position: "right", style: { background: bg } }).showToast();
@@ -41,8 +38,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const pc = new RTCPeerConnection({ iceServers });
     const dataChannel = pc.createDataChannel("files", { ordered: true });
     dataChannel.binaryType = "arraybuffer";
-
-    // Backpressure threshold
     dataChannel.bufferedAmountLowThreshold = 256 * 1024;
 
     const queue = [];
@@ -52,7 +47,6 @@ document.addEventListener('DOMContentLoaded', () => {
       log(`Data channel open for receiver ${receiverSocketId}`);
       while (queue.length) dataChannel.send(queue.shift());
     };
-
     dataChannel.onmessage = e => log(`Received from ${receiverSocketId}: ${e.data}`);
 
     pc.onicecandidate = event => {
@@ -128,8 +122,8 @@ document.addEventListener('DOMContentLoaded', () => {
   async function sendFile(file) {
     return new Promise(resolve => {
       const meta = { filename: file.name, size: file.size, type: file.type };
-      const fileId = crypto.randomUUID(); // unique ID per file
-      log(`Sending file ${file.name} with ID ${fileId}`);
+      const fileId = crypto.randomUUID();
+      log(`Sending file ${file.name} (ID: ${fileId})`);
 
       const row = document.createElement('div');
       row.className = 'file-entry';
@@ -141,6 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const header = JSON.stringify({ type: "header", fileId, meta });
         if (dataChannel.readyState === 'open') dataChannel.send(header);
         else queue.push(header);
+        log(`Header sent/queued`);
       });
 
       const chunkSize = 16384;
@@ -164,24 +159,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 dataChannel.onbufferedamountlow = () => {
                   dataChannel.send(buffer);
                   dataChannel.onbufferedamountlow = null;
+                  log(`Chunk sent after buffer low`);
                 };
               } else {
                 dataChannel.send(buffer);
+                log(`Chunk sent ${offset + chunkData.byteLength}/${file.size}`);
               }
             } else queue.push(buffer);
           });
 
           offset += chunkData.byteLength;
           row.querySelector('.progress-bar-fill').style.width = `${Math.floor((offset / file.size) * 100)}%`;
-          log(`Sent chunk ${offset}/${file.size} bytes for ${file.name}`);
 
           if (offset < file.size) readSlice(offset);
           else {
-            // Send done message
             receivers.forEach(({ dataChannel, queue }) => {
               const done = JSON.stringify({ type: 'done', fileId });
               if (dataChannel.readyState === 'open') dataChannel.send(done);
               else queue.push(done);
+              log(`Done sent/queued`);
             });
             totalSentFiles++;
             totalSentBytes += file.size;
@@ -194,9 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sendChunk();
       };
 
-      function readSlice(o) {
-        reader.readAsArrayBuffer(file.slice(o, o + chunkSize));
-      }
+      function readSlice(o) { reader.readAsArrayBuffer(file.slice(o, o + chunkSize)); }
       readSlice(0);
     });
   }
